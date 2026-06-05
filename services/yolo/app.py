@@ -97,6 +97,8 @@ def predict(file: UploadFile = File(...)):
     """
     Predict objects in an image
     """
+    if(file.content_type not in ["image/jpeg", "image/png", "image/jpg"]):
+        raise HTTPException(status_code=400, detail="Only image files are supported")
     ext = os.path.splitext(file.filename)[1]
     uid = str(uuid.uuid4())
     original_path = os.path.join(UPLOAD_DIR, uid + ext)
