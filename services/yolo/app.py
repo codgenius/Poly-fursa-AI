@@ -72,8 +72,6 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_label ON detection_objects (label)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_score ON detection_objects (score)")
 
-init_db()
-
 def save_prediction_session(uid, original_image, predicted_image):
     """
     Save prediction session to database

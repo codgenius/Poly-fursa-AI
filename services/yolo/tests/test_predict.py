@@ -1,11 +1,15 @@
 import unittest
+import tempfile
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
-from app import app
+import app as app_module
+from app import app, init_db
 
 
 class TestPredict(unittest.TestCase):
     def setUp(self):
+        _, app_module.DB_PATH = tempfile.mkstemp(suffix=".db")
+        init_db()
         self.client = TestClient(app)
 
     @patch("app.Image")   # prevent PIL from processing a fake frame
