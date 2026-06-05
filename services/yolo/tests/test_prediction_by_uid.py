@@ -1,23 +1,12 @@
-import os
+"""
+Tests for GET /prediction/{uid} endpoint
+"""
 import sqlite3
-import pytest
-from fastapi.testclient import TestClient
-
 import app as app_module
-from app import app, init_db
+
 
 def insert_test_data(uid: str, timestamp: str, labels_with_scores: list):
-    """
-    Helper to insert test data into DB.
-    
-    Args:
-        uid: prediction session ID
-        timestamp: prediction timestamp
-        labels_with_scores: list of (label, score) tuples
-    
-    Example:
-        insert_test_data("session-1", "2024-01-01", [("car", 0.95), ("person", 0.87)])
-    """
+    """Helper to insert test data into DB"""
     with sqlite3.connect(app_module.DB_PATH) as conn:
         conn.execute(
             "INSERT INTO prediction_sessions (uid, timestamp, original_image, predicted_image) VALUES (?, ?, ?, ?)",
@@ -29,6 +18,7 @@ def insert_test_data(uid: str, timestamp: str, labels_with_scores: list):
                 (uid, label, score, "[0,0,100,100]")
             )
         conn.commit()
+
 
 def test_get_prediction_by_uid_happy_path(client):
     """Test retrieving a specific prediction session"""
