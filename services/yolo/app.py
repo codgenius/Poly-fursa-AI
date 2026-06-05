@@ -72,6 +72,8 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_label ON detection_objects (label)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_score ON detection_objects (score)")
 
+init_db()
+
 def save_prediction_session(uid, original_image, predicted_image):
     """
     Save prediction session to database
@@ -180,6 +182,60 @@ def get_prediction_image(uid: str):
         raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(row[0])
 
+
+@app.get("/predictions/label/{label}")
+def get_predictions_by_label(label: str):
+    """
+    Get all prediction sessions that detected a given label
+    """
+    if not label:
+        raise HTTPException(status_code=400, detail="Label cannot be empty")
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""SELECT DISTINCT ps.uid, ps.timestamp, ps.original_image, ps.predicted_image
+            FROM prediction_sessions ps
+            JOIN detection_objects do ON ps.uid = do.prediction_uid
+            WHERE do.label = ?""", (label,)).fetchall()
+        
+        result = []
+        for row in rows:
+            objects = conn.execute(
+                "SELECT id, label, score, box FROM detection_objects WHERE prediction_uid = ? AND label = ?",
+                (row["uid"], label)
+            ).fetchall()
+            result.append({
+                "uid": row["uid"],
+                "timestamp": row["timestamp"],
+                "original_image": row["original_image"],
+                "predicted_image": row["predicted_image"],
+                "detection_objects": [
+                    {"id": obj["id"], "label": obj["label"], "score": obj["score"], "box": obj["box"]}
+                    for obj in objects
+                ]
+            })
+        return result
+
+
+@app.get("/predictions/score/{min_score}")
+def get_predictions_by_score(min_score: float):
+    """
+    Get all detection objects with confidence score >= min_score
+    """
+    if min_score < 0.0 or min_score > 1.0:
+        raise HTTPException(status_code=400, detail="min_score must be between 0.0 and 1.0")
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        objects = conn.execute(
+            "SELECT id, prediction_uid, label, score, box FROM detection_objects WHERE score >= ?",
+            (min_score,)
+        ).fetchall()
+        
+        return [
+            {"id": obj["id"], "prediction_uid": obj["prediction_uid"], "label": obj["label"], "score": obj["score"], "box": obj["box"]}
+            for obj in objects
+        ]
 
 @app.get("/health")
 def health():
