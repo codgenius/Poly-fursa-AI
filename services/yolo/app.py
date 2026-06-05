@@ -8,6 +8,7 @@ import logging
 import os
 import uuid
 import shutil
+import time
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -71,7 +72,6 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_label ON detection_objects (label)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_score ON detection_objects (score)")
 
-
 def save_prediction_session(uid, original_image, predicted_image):
     """
     Save prediction session to database
@@ -97,6 +97,8 @@ def predict(file: UploadFile = File(...)):
     """
     Predict objects in an image
     """
+    start_time = time.time()
+    
     if(file.content_type not in ["image/jpeg", "image/png", "image/jpg"]):
         raise HTTPException(status_code=400, detail="Only image files are supported")
     ext = os.path.splitext(file.filename)[1]
@@ -123,11 +125,12 @@ def predict(file: UploadFile = File(...)):
         bbox = box.xyxy[0].tolist()
         save_detection_object(uid, label, score, bbox)
         detected_labels.append(label)
-
+    processing_time = round(time.time() - start_time, 2)
     return {
         "prediction_uid": uid, 
         "detection_count": len(results[0].boxes),
-        "labels": detected_labels
+        "labels": detected_labels,
+        "time_took": processing_time
     }
 
 @app.get("/prediction/{uid}")
