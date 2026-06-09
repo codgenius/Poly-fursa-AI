@@ -2,6 +2,7 @@
 Tests for GET /prediction/{uid} endpoint
 """
 import sqlite3
+import uuid
 import pytest
 from .helpers import insert_test_data
 import app as app_module
@@ -43,3 +44,25 @@ def test_get_prediction_by_uid_no_objects(client):
     data = response.json()
     assert data["uid"] == "session-empty"
     assert data["detection_objects"] == []
+
+
+def test_get_prediction_image_not_found(client):
+    """Test /prediction/{uid}/image returns 404 for non-existent uid"""
+    response = client.get("/prediction/nonexistent-uid/image")
+    assert response.status_code == 404
+    assert "Image not found" in response.json()["detail"]
+
+
+def test_get_prediction_image_missing_file(client):
+    """Test /prediction/{uid}/image returns 404 when file path doesn't exist on disk"""
+    uid = str(uuid.uuid4())
+    with sqlite3.connect(app_module.DB_PATH, uri=True) as conn:
+        conn.execute("""
+            INSERT INTO prediction_sessions (uid, original_image, predicted_image)
+            VALUES (?, ?, ?)
+        """, (uid, "/fake/path.jpg", "/nonexistent/file.jpg"))
+        conn.commit()
+    
+    response = client.get(f"/prediction/{uid}/image")
+    assert response.status_code == 404
+    assert "Image not found" in response.json()["detail"]
