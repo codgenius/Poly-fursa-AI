@@ -21,7 +21,16 @@ jobs:
         run: |
           pip install -r services/yolo/torch-requirements.txt
           pip install -r services/yolo/requirements.txt
+          pip install pytest-cov
 
-      - name: Run tests
-        run: pytest tests/
+      - name: Run tests with coverage
+        run: pytest tests/ -v --cov=. --cov-report=term --cov-report=xml
         working-directory: services/yolo
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./services/yolo/coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
