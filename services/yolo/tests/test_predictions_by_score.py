@@ -1,23 +1,8 @@
 """
 Tests for GET /predictions/score/{min_score} endpoint
 """
-import sqlite3
-import app as app_module
-
-
-def insert_test_data(uid: str, timestamp: str, labels_with_scores: list):
-    """Helper to insert test data into DB"""
-    with sqlite3.connect(app_module.DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO prediction_sessions (uid, timestamp, original_image, predicted_image) VALUES (?, ?, ?, ?)",
-            (uid, timestamp, "original.jpg", "predicted.jpg")
-        )
-        for label, score in labels_with_scores:
-            conn.execute(
-                "INSERT INTO detection_objects (prediction_uid, label, score, box) VALUES (?, ?, ?, ?)",
-                (uid, label, score, "[0,0,100,100]")
-            )
-        conn.commit()
+import pytest
+from .helpers import insert_test_data
 
 
 def test_get_predictions_by_score_happy_path(client):
