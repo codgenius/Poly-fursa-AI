@@ -1,30 +1,45 @@
 """
 Shared pytest configuration and fixtures for all tests.
-This file is auto-discovered by pytest and fixtures are available to all test files.
+See CONFTEST_EXPLAINED.md for detailed explanation.
 """
 import os
 import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ.setdefault("CONFIDENCE_THRESHOLD", "0.5")
-
 import app as app_module
 from app import app, init_db
 
 
 @pytest.fixture(autouse=True)
-def setup_db(tmp_path, monkeypatch):
-    """
-    Fixture to set up a temporary database for each test.
-    autouse=True means it runs automatically for every test.
-    """
-    db_file = str(tmp_path / "test_predictions.db")
+def setup_db(monkeypatch):
+    """Set up in-memory database for each test. See CONFTEST_EXPLAINED.md for details."""
+    db_file = "file:memdb?mode=memory&cache=shared"
+    real_connect = sqlite3.connect
+    
+    def patched_connect(database, *args, **kwargs):
+        if database == db_file:
+            kwargs["uri"] = True
+        return real_connect(database, *args, **kwargs)
+    
     monkeypatch.setattr("app.DB_PATH", db_file)
+    monkeypatch.setattr(sqlite3, "connect", patched_connect)
+    
+    keeper_conn = sqlite3.connect(db_file, uri=True)
     init_db()
+    
+    yield  # TEST RUNS HERE
+    
+    # Cleanup: drop tables for isolation
+    with sqlite3.connect(db_file, uri=True) as conn:
+        conn.execute("DROP TABLE IF EXISTS detection_objects")
+        conn.execute("DROP TABLE IF EXISTS prediction_sessions")
+        conn.commit()
+    
+    keeper_conn.close()
 
 
 @pytest.fixture
 def client():
-    """Fixture that provides a TestClient for making requests to the API."""
+    """FastAPI TestClient for testing API endpoints. See CONFTEST_EXPLAINED.md for details."""
     return TestClient(app)

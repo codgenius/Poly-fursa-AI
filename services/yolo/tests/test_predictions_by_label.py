@@ -32,9 +32,9 @@ def test_get_predictions_by_label_empty_result(client):
 
 
 def test_get_predictions_by_label_empty_string(client):
-    """Test empty label returns 400 error"""
+    """Test empty label returns 404 (FastAPI routing doesn't match empty path)"""
     response = client.get("/predictions/label/")
-    assert response.status_code == 404  # FastAPI treats empty path as no param
+    assert response.status_code == 404  # FastAPI treats empty path as no route match
 
 
 def test_get_predictions_by_label_single_object(client):
