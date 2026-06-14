@@ -10,13 +10,26 @@ import uuid
 import shutil
 import time
 import signal
+import signal
+import threading
+import time
+import os
 import sys
 
+is_shutting_down = False
+
+def delayed_exit():
+    logging.info("Cleanup started. Waiting before exit...")
+    time.sleep(10)
+    logging.info("Cleanup done. Exiting.")
+    os._exit(0)
 
 def handle_sigterm(signum, frame):
     global is_shutting_down
     is_shutting_down = True
     logging.info("Received SIGTERM. Shutting down gracefully...")
+    logging.info("Cleanup started. Waiting before exit...")
+    time.sleep(10)
     logging.info("Cleanup done. Exiting.")
     sys.exit(0)
 
