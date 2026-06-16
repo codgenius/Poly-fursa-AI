@@ -269,6 +269,12 @@ def health():
     """
     return {"status": "ok"}
 
+@app.get("/ready")
+def ready():
+    if is_shutting_down:
+        raise HTTPException(status_code=503, detail="Service is shutting down")
+    return {"status": "ready"}
+
 if __name__ == "__main__":
     import uvicorn
 
@@ -276,8 +282,3 @@ if __name__ == "__main__":
     
     uvicorn.run(app, host="0.0.0.0", port=8080)
 
-@app.get("/ready")
-def ready():
-    if is_shutting_down:
-        raise HTTPException(status_code=503, detail="Service is shutting down")
-    return {"status": "ready"}
