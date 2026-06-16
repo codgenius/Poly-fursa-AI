@@ -275,6 +275,10 @@ def ready():
         raise HTTPException(status_code=503, detail="Service is shutting down")
     return {"status": "ready"}
 
+@app.get("/hello")
+def hello():
+    return{"status": "hello there"}
+
 if __name__ == "__main__":
     import uvicorn
 
