@@ -1,4 +1,4 @@
-name: Deploy Yolo
+name: Deploy PolyAI
 
 on:
   push:
@@ -25,13 +25,21 @@ jobs:
             git pull origin dev
 
             source .venv/bin/activate
-            
+
             pip install -r services/yolo/torch-requirements.txt
             pip install -r services/yolo/requirements.txt
+            pip install -r services/agent/requirements.txt
+
+            cd /home/ubuntu/Poly-fursa-AI/services/frontend
+            npm install
 
             sudo systemctl restart yolo.service
+            sudo systemctl restart poly-agent.service
+            sudo systemctl restart poly-frontend.service
 
             sudo systemctl status yolo.service --no-pager
+            sudo systemctl status poly-agent.service --no-pager
+            sudo systemctl status poly-frontend.service --no-pager
 
   deploy-prod:
     if: github.ref == 'refs/heads/main'
@@ -49,10 +57,20 @@ jobs:
             git fetch origin
             git checkout main
             git pull origin main
-            
+
             source .venv/bin/activate
+
             pip install -r services/yolo/torch-requirements.txt
             pip install -r services/yolo/requirements.txt
-            
+            pip install -r services/agent/requirements.txt
+
+            cd /home/ubuntu/Poly-fursa-AI/services/frontend
+            npm install
+
             sudo systemctl restart yolo.service
+            sudo systemctl restart poly-agent.service
+            sudo systemctl restart poly-frontend.service
+
             sudo systemctl status yolo.service --no-pager
+            sudo systemctl status poly-agent.service --no-pager
+            sudo systemctl status poly-frontend.service --no-pager
