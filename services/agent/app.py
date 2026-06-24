@@ -29,10 +29,12 @@ from pydantic import BaseModel, Field
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
 MODEL = os.environ.get("MODEL")
 
-# Text-only models
+# Text-only models - format: "provider:model_id" or "bedrock:model_id"
 ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
     "anthropic:claude-haiku-4-5",
+    "bedrock:amazon.nova-micro-v1:0",
+    "bedrock:anthropic.claude-3-5-sonnet-20241022-v2:0",
 }
 
 if MODEL not in ALLOWED_MODELS:
@@ -90,7 +92,14 @@ TOOLS = {
     detect_objects.name: detect_objects
 }
 
-llm = init_chat_model(MODEL, temperature=0)
+# Parse MODEL string (format: "provider:model_id")
+provider, model_id = MODEL.split(":", 1)
+
+if provider == "bedrock":
+    llm = init_chat_model(model_id, model_provider="bedrock", temperature=0, region_name="us-east-1")
+else:
+    llm = init_chat_model(MODEL, temperature=0)
+
 llm_with_tools = llm.bind_tools(list(TOOLS.values()))
 
 
