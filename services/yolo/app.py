@@ -15,6 +15,8 @@ import threading
 import time
 import os
 import sys
+from pydantic import BaseModel
+from typing import List
 
 is_shutting_down = False
 
@@ -119,7 +121,13 @@ def save_detection_object(prediction_uid, label, score, box):
             VALUES (?, ?, ?, ?)
         """, (prediction_uid, label, score, str(box)))
 
-@app.post("/predict")
+class PredictResponse(BaseModel):
+    prediction_uid: str
+    detection_count: int
+    labels: List[str]
+    time_took: float
+    
+@app.post("/predict", response_model=PredictResponse)
 def predict(file: UploadFile = File(...)):
     """
     Predict objects in an image

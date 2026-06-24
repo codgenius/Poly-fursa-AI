@@ -6,6 +6,8 @@ import os
 from contextvars import ContextVar
 from typing import Optional
 
+import time
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -20,9 +22,9 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
 MODEL = os.environ.get("MODEL")
@@ -72,38 +74,6 @@ TOOLS = {
 llm = init_chat_model(MODEL, temperature=0)
 llm_with_tools = llm.bind_tools(list(TOOLS.values()))
 
-def run_agent(history: list) -> str:
-    """
-    Simple ReAct loop:
-      1. Send messages to the LLM.
-      2. If the LLM requests tool calls, execute them and append results.
-      3. Repeat until the LLM returns a plain text response.
-    """
-    messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
-
-    while True:
-        response: AIMessage = llm_with_tools.invoke(messages)
-        messages.append(response)
-
-        # No tool calls, the model produced its final answer
-        if not response.tool_calls:
-            return response.content
-
-        # Execute every tool the model requested
-        for tool_call in response.tool_calls:
-            tool_fn = TOOLS[tool_call["name"]]
-            tool_result = tool_fn.invoke(tool_call)          # returns a ToolMessage
-            messages.append(tool_result)
-
-
-app = FastAPI(title="Vision Agent")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_methods=["POST", "GET"],
-    allow_headers=["Content-Type"],
-)
 
 
 class ChatMessage(BaseModel):
@@ -118,7 +88,57 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+    prediction_id: Optional[str] = None
+    annotated_image: Optional[str] = None
+    agent_loop_time_s: float = 0.0
+    iterations: int = 0
+    tools_called: list[str] = Field(default_factory=list)
+    context_limit_exceeded: bool = False
 
+def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
+    """
+    Simple ReAct loop with max-iterations guard and structured metadata.
+    """
+    start_time = time.time()
+    messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
+    tools_called: list[str] = []
+
+    for iteration in range(1, max_iterations + 1):
+        response: AIMessage = llm_with_tools.invoke(messages)
+        messages.append(response)
+
+        if not response.tool_calls:
+            return ChatResponse(
+                response=response.content,
+                agent_loop_time_s=round(time.time() - start_time, 3),
+                iterations=iteration,
+                tools_called=tools_called,
+                context_limit_exceeded=False,
+            )
+
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tools_called.append(tool_name)
+
+            tool_fn = TOOLS[tool_name]
+            tool_result = tool_fn.invoke(tool_call)
+            messages.append(tool_result)
+
+    return ChatResponse(
+        response="Sorry, I could not complete the request because the agent reached the maximum number of tool calls.",
+        agent_loop_time_s=round(time.time() - start_time, 3),
+        iterations=max_iterations,
+        tools_called=tools_called,
+        context_limit_exceeded=True,
+    )
+app = FastAPI(title="Vision Agent")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_methods=["POST", "GET"],
+    allow_headers=["Content-Type"],
+)
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
@@ -138,7 +158,7 @@ def chat(request: ChatRequest):
 
     token = _current_image_b64.set(latest_image)
     try:
-        return ChatResponse(response=run_agent(lc_messages))
+        return run_agent(lc_messages)
     finally:
         _current_image_b64.reset(token)
 
