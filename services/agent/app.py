@@ -48,6 +48,10 @@ SYSTEM_PROMPT = (
 )
 
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
+_detection_result = {
+    "prediction_id": None,
+    "annotated_image": None,
+}
 
 @tool
 def detect_objects() -> str:
@@ -57,14 +61,29 @@ def detect_objects() -> str:
         return json.dumps({"error": "No image was provided by the user."})
 
     image_bytes = base64.b64decode(image_b64)
+
     with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{YOLO_SERVICE_URL}/predict",
             files={"file": ("image.jpg", io.BytesIO(image_bytes), "image/jpeg")},
         )
         response.raise_for_status()
-    return json.dumps(response.json())
 
+        prediction_data = response.json()
+        prediction_id = prediction_data.get("prediction_uid")
+
+        if prediction_id:
+            _detection_result["prediction_id"] = prediction_id
+
+            image_response = client.get(
+                f"{YOLO_SERVICE_URL}/prediction/{prediction_id}/image"
+            )
+            image_response.raise_for_status()
+
+            annotated_image_b64 = base64.b64encode(image_response.content).decode("utf-8")
+            _detection_result["annotated_image"] = annotated_image_b64
+
+    return json.dumps(prediction_data)
 
 # Registry: map tool name -> tool function
 TOOLS = {
@@ -110,6 +129,8 @@ def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
         if not response.tool_calls:
             return ChatResponse(
                 response=response.content,
+                prediction_id=_detection_result["prediction_id"],
+                annotated_image=_detection_result["annotated_image"],
                 agent_loop_time_s=round(time.time() - start_time, 3),
                 iterations=iteration,
                 tools_called=tools_called,
@@ -126,6 +147,8 @@ def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
 
     return ChatResponse(
         response="Sorry, I could not complete the request because the agent reached the maximum number of tool calls.",
+        prediction_id=_detection_result["prediction_id"],
+        annotated_image=_detection_result["annotated_image"],
         agent_loop_time_s=round(time.time() - start_time, 3),
         iterations=max_iterations,
         tools_called=tools_called,
@@ -148,7 +171,7 @@ def chat(request: ChatRequest):
     for msg in request.messages:
         if msg.role == "user":
             if msg.image_base64:
-                latest_image = msg.image_base64          # saved for detect_objects tool
+                latest_image = msg.image_base64
                 content = msg.content + "\n[An image was uploaded. Use existing tools to analyze it according to user instructions.]"
             else:
                 content = msg.content
@@ -156,12 +179,15 @@ def chat(request: ChatRequest):
         else:
             lc_messages.append(AIMessage(content=msg.content))
 
-    token = _current_image_b64.set(latest_image)
+    _detection_result["prediction_id"] = None
+    _detection_result["annotated_image"] = None
+
+    image_token = _current_image_b64.set(latest_image)
+
     try:
         return run_agent(lc_messages)
     finally:
-        _current_image_b64.reset(token)
-
+        _current_image_b64.reset(image_token)
 
 @app.get("/health")
 def health():
