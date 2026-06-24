@@ -5,6 +5,7 @@ import type { ChatMessage } from "@/lib/types";
 
 export default function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
+
   return (
     <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
       <div
@@ -22,6 +23,15 @@ export default function MessageBubble({ message }: { message: ChatMessage }) {
             className="mb-2 max-h-48 rounded-lg object-contain"
           />
         )}
+
+        {message.annotated_image && (
+          <img
+            src={`data:image/jpeg;base64,${message.annotated_image}`}
+            alt="annotated"
+            className="mb-2 max-h-96 rounded-lg object-contain border"
+          />
+        )}
+
         {isUser ? (
           <p className="whitespace-pre-wrap">{message.content}</p>
         ) : (
