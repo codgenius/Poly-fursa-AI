@@ -5,10 +5,10 @@ import pytest
 from .helpers import insert_test_data
 
 
-def test_get_predictions_by_score_happy_path(client):
+def test_get_predictions_by_score_happy_path(client, db):
     """Test getting predictions above confidence threshold"""
-    insert_test_data("session-1", "2024-01-01", [("car", 0.95), ("person", 0.87)])
-    insert_test_data("session-2", "2024-01-02", [("car", 0.45), ("dog", 0.72)])
+    insert_test_data("session-1", "2024-01-01", [("car", 0.95), ("person", 0.87)], db=db)
+    insert_test_data("session-2", "2024-01-02", [("car", 0.45), ("dog", 0.72)], db=db)
     
     response = client.get("/predictions/score/0.8")
     assert response.status_code == 200
@@ -22,9 +22,9 @@ def test_get_predictions_by_score_happy_path(client):
         assert obj["label"] in ["car", "person"]
 
 
-def test_get_predictions_by_score_empty_result(client):
+def test_get_predictions_by_score_empty_result(client, db):
     """Test high threshold returns empty list"""
-    insert_test_data("session-1", "2024-01-01", [("car", 0.45)])
+    insert_test_data("session-1", "2024-01-01", [("car", 0.45)], db=db)
     
     response = client.get("/predictions/score/0.9")
     assert response.status_code == 200
@@ -45,9 +45,9 @@ def test_get_predictions_by_score_invalid_high(client):
     assert "min_score must be between 0.0 and 1.0" in response.json()["detail"]
 
 
-def test_get_predictions_by_score_boundary_zero(client):
+def test_get_predictions_by_score_boundary_zero(client, db):
     """Test score = 0.0 (lowest boundary)"""
-    insert_test_data("session-1", "2024-01-01", [("car", 0.01), ("person", 0.99)])
+    insert_test_data("session-1", "2024-01-01", [("car", 0.01), ("person", 0.99)], db=db)
     
     response = client.get("/predictions/score/0.0")
     assert response.status_code == 200
@@ -55,13 +55,12 @@ def test_get_predictions_by_score_boundary_zero(client):
     assert len(data) == 2  # All objects should be >= 0.0
 
 
-def test_get_predictions_by_score_boundary_one(client):
+def test_get_predictions_by_score_boundary_one(client, db):
     """Test score = 1.0 (highest boundary)"""
-    insert_test_data("session-1", "2024-01-01", [("car", 1.0)])
+    insert_test_data("session-1", "2024-01-01", [("car", 1.0)], db=db)
     
     response = client.get("/predictions/score/1.0")
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 1
     assert data[0]["score"] == 1.0
-

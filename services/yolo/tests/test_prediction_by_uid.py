@@ -1,18 +1,17 @@
 """
 Tests for GET /prediction/{uid} endpoint
 """
-import sqlite3
 import uuid
 import tempfile
 import os
 import pytest
 from .helpers import insert_test_data
-import app as app_module
+from models import PredictionSession, DetectionObject
 
 
-def test_get_prediction_by_uid_happy_path(client):
+def test_get_prediction_by_uid_happy_path(client, db):
     """Test retrieving a specific prediction session"""
-    insert_test_data("session-1", "2024-01-01", [("car", 0.95), ("person", 0.87)])
+    insert_test_data("session-1", "2024-01-01", [("car", 0.95), ("person", 0.87)], db=db)
     
     response = client.get("/prediction/session-1")
     assert response.status_code == 200
@@ -32,14 +31,16 @@ def test_get_prediction_by_uid_not_found(client):
     assert "Prediction not found" in response.json()["detail"]
 
 
-def test_get_prediction_by_uid_no_objects(client):
+def test_get_prediction_by_uid_no_objects(client, db):
     """Test prediction session with no detection objects"""
-    with sqlite3.connect(app_module.DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO prediction_sessions (uid, timestamp, original_image, predicted_image) VALUES (?, ?, ?, ?)",
-            ("session-empty", "2024-01-01", "original.jpg", "predicted.jpg")
-        )
-        conn.commit()
+    prediction_session = PredictionSession(
+        uid="session-empty",
+        timestamp="2024-01-01",
+        original_image="original.jpg",
+        predicted_image="predicted.jpg"
+    )
+    db.add(prediction_session)
+    db.commit()
     
     response = client.get("/prediction/session-empty")
     assert response.status_code == 200
@@ -55,22 +56,23 @@ def test_get_prediction_image_not_found(client):
     assert "Image not found" in response.json()["detail"]
 
 
-def test_get_prediction_image_missing_file(client):
+def test_get_prediction_image_missing_file(client, db):
     """Test /prediction/{uid}/image returns 404 when file path doesn't exist on disk"""
     uid = str(uuid.uuid4())
-    with sqlite3.connect(app_module.DB_PATH, uri=True) as conn:
-        conn.execute("""
-            INSERT INTO prediction_sessions (uid, original_image, predicted_image)
-            VALUES (?, ?, ?)
-        """, (uid, "/fake/path.jpg", "/nonexistent/file.jpg"))
-        conn.commit()
+    prediction_session = PredictionSession(
+        uid=uid,
+        original_image="/fake/path.jpg",
+        predicted_image="/nonexistent/file.jpg"
+    )
+    db.add(prediction_session)
+    db.commit()
     
     response = client.get(f"/prediction/{uid}/image")
     assert response.status_code == 404
     assert "Image not found" in response.json()["detail"]
 
 
-def test_get_prediction_image_success(client):
+def test_get_prediction_image_success(client, db):
     """Test /prediction/{uid}/image returns file successfully when it exists on disk"""
     # Create a temporary file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.jpg', delete=False) as f:
@@ -80,12 +82,13 @@ def test_get_prediction_image_success(client):
     try:
         uid = str(uuid.uuid4())
         # Insert prediction session pointing to the temporary file
-        with sqlite3.connect(app_module.DB_PATH, uri=True) as conn:
-            conn.execute("""
-                INSERT INTO prediction_sessions (uid, original_image, predicted_image)
-                VALUES (?, ?, ?)
-            """, (uid, "/fake/original.jpg", temp_file_path))
-            conn.commit()
+        prediction_session = PredictionSession(
+            uid=uid,
+            original_image="/fake/original.jpg",
+            predicted_image=temp_file_path
+        )
+        db.add(prediction_session)
+        db.commit()
         
         # Get the image and verify it returns successfully
         response = client.get(f"/prediction/{uid}/image")

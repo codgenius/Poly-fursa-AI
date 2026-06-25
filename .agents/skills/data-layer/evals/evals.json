@@ -1,0 +1,87 @@
+[
+  {
+    "name": "refactor_yolo_api_to_sqlalchemy",
+    "prompt": "refactor the api to use sqlalchemy",
+    "expected_output": "The agent creates services/yolo/models.py with SQLAlchemy ORM models PredictionSession and DetectionObject, creates services/yolo/db.py with engine, SessionLocal, get_db, SQLite default and Postgres configuration via environment variables, updates services/yolo/app.py to use SQLAlchemy sessions and FastAPI Depends(get_db), updates services/yolo/requirements.txt to include SQLAlchemy and a Postgres driver, preserves all existing endpoint paths and response shapes, removes sqlite3 imports and sqlite3.connect usage from the YOLO app code, and runs pytest tests/ or reports test failures with details.",
+    "assertions": [
+      "services/yolo/models.py exists",
+      "services/yolo/db.py exists",
+      "PredictionSession and DetectionObject ORM classes are defined",
+      "services/yolo/app.py uses Depends(get_db) or otherwise injects SQLAlchemy sessions",
+      "services/yolo/app.py does not import sqlite3",
+      "services/yolo/app.py does not call sqlite3.connect",
+      "POST /predict response still includes prediction_uid, detection_count, labels, and time_took",
+      "GET /prediction/{uid} response still includes uid, timestamp, original_image, predicted_image, and detection_objects",
+      "SQLite remains the default backend",
+      "Postgres is configurable with environment variables"
+    ]
+  },
+  {
+    "name": "add_recent_predictions_endpoint",
+    "prompt": "add an endpoint GET /predictions/recent that returns the 10 most recent sessions",
+    "expected_output": "The agent adds GET /predictions/recent using the SQLAlchemy data layer, queries PredictionSession ordered by timestamp descending, limits results to 10, returns the same session-style fields used by existing prediction endpoints, includes detection objects if consistent with existing session responses, does not use raw SQL or sqlite3, and adds or updates tests for the endpoint.",
+    "assertions": [
+      "GET /predictions/recent endpoint exists",
+      "Endpoint uses SQLAlchemy ORM query",
+      "Query orders by timestamp descending",
+      "Query limits to 10 results",
+      "No sqlite3 usage is introduced",
+      "Response shape is consistent with existing prediction session responses",
+      "Tests cover the endpoint"
+    ]
+  },
+  {
+    "name": "add_user_feedback_table",
+    "prompt": "add a UserFeedback table to track user ratings per prediction",
+    "expected_output": "The agent updates services/yolo/models.py with a UserFeedback SQLAlchemy ORM model linked to prediction_uid, creates any needed API helpers or endpoints only if requested by the existing project pattern, preserves existing endpoints and response shapes, updates table creation through SQLAlchemy metadata, avoids raw SQL and sqlite3, and adds tests for creating or querying feedback if an endpoint is added.",
+    "assertions": [
+      "UserFeedback ORM model is defined",
+      "UserFeedback includes prediction_uid and rating fields",
+      "The model uses SQLAlchemy columns",
+      "Existing PredictionSession and DetectionObject models remain intact",
+      "Existing endpoint response shapes are preserved",
+      "No raw sqlite3 usage is introduced",
+      "Tests or clear verification steps are provided"
+    ]
+  },
+  {
+    "name": "delete_prediction_by_uid",
+    "prompt": "delete a prediction session and all its detection objects by uid",
+    "expected_output": "The agent implements deletion through SQLAlchemy ORM so deleting a prediction session also deletes its related detection objects, either through ORM cascade or explicit SQLAlchemy deletes. It preserves existing endpoints unless adding a new DELETE endpoint is requested, returns appropriate 404 behavior when the uid does not exist, avoids raw SQL and sqlite3, and adds tests covering deletion and missing uid behavior.",
+    "assertions": [
+      "Deletion uses SQLAlchemy ORM operations",
+      "DetectionObject rows for the prediction are deleted",
+      "Missing uid returns 404 if an endpoint is added",
+      "No sqlite3.connect usage appears",
+      "No raw DELETE SQL string is used for normal CRUD",
+      "Tests cover successful delete and missing uid"
+    ]
+  },
+  {
+    "name": "add_processing_time_column",
+    "prompt": "add a column processing_time_ms to the prediction_sessions table",
+    "expected_output": "The agent updates the SQLAlchemy PredictionSession model with processing_time_ms, stores prediction processing time during POST /predict, preserves the existing /predict response keys and existing read response shapes unless the user explicitly requests exposing the new field, avoids raw SQL and sqlite3, and adds or updates tests confirming the value is stored.",
+    "assertions": [
+      "PredictionSession includes processing_time_ms column",
+      "POST /predict stores processing time in the database",
+      "Existing /predict response keys are preserved",
+      "Existing read endpoint response shapes are not changed unless requested",
+      "No sqlite3 usage is introduced",
+      "Tests verify processing_time_ms is stored"
+    ]
+  },
+  {
+    "name": "postgres_configurable_backend",
+    "prompt": "make the database backend configurable so we can use postgres in production",
+    "expected_output": "The agent implements database backend selection in services/yolo/db.py using DB_BACKEND with SQLite as the default and PostgreSQL when DB_BACKEND=postgres. It uses DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, and DB_NAME environment variables, keeps SQLite working locally, adds a PostgreSQL driver dependency, does not hardcode secrets, and documents or tests both configurations.",
+    "assertions": [
+      "services/yolo/db.py reads DB_BACKEND",
+      "SQLite is the default backend",
+      "Postgres URL uses DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, and DB_NAME",
+      "No credentials are hardcoded",
+      "SQLAlchemy create_engine is used",
+      "PostgreSQL driver dependency is added",
+      "Verification steps for SQLite and Postgres are provided"
+    ]
+  }
+]
