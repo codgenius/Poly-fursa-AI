@@ -1,0 +1,61 @@
+[
+  {
+    "name": "sqlalchemy_data_layer_refactor",
+    "prompt": "refactor the YOLO API data layer",
+    "expected_output": "Uses SQLAlchemy ORM models, db.py session configuration, FastAPI dependency injection, SQLite default backend, PostgreSQL configuration support, preserves existing response shapes, removes sqlite3 usage, and adds/updates meaningful tests.",
+    "assertions": [
+      "SQLAlchemy models are used",
+      "get_db or equivalent session dependency exists",
+      "sqlite3 is not used in application data access code",
+      "existing API response shapes are preserved",
+      "SQLite remains the default backend",
+      "PostgreSQL is configurable",
+      "tests are run or added"
+    ]
+  },
+  {
+    "name": "database_backed_endpoint",
+    "prompt": "add a database-backed endpoint to list recent prediction sessions",
+    "expected_output": "Adds the requested endpoint using SQLAlchemy ORM queries, preserves existing endpoint behavior, avoids raw SQL/sqlite3, and adds tests for the new endpoint.",
+    "assertions": [
+      "new endpoint uses SQLAlchemy ORM",
+      "no sqlite3 usage is introduced",
+      "existing endpoints are unchanged",
+      "tests cover the new endpoint"
+    ]
+  },
+  {
+    "name": "new_database_model",
+    "prompt": "add a database model for user feedback on predictions",
+    "expected_output": "Adds the requested model using the shared SQLAlchemy Base, relates it to predictions where appropriate, preserves existing response shapes unless explicitly changed, and adds tests or verification.",
+    "assertions": [
+      "new model uses shared SQLAlchemy Base",
+      "existing models remain intact",
+      "no raw SQL CRUD is introduced",
+      "existing API responses are preserved"
+    ]
+  },
+  {
+    "name": "database_column_change",
+    "prompt": "add a processing time column to stored prediction sessions",
+    "expected_output": "Adds the requested column through the SQLAlchemy model, stores the value through ORM operations, does not expose it in API responses unless requested, and updates tests.",
+    "assertions": [
+      "column is added to SQLAlchemy model",
+      "value is persisted with ORM operations",
+      "response shape is unchanged unless requested",
+      "tests verify persistence"
+    ]
+  },
+  {
+    "name": "delete_database_records",
+    "prompt": "delete a prediction session and its detection objects",
+    "expected_output": "Deletes related database records using SQLAlchemy ORM relationships, cascade behavior, or ORM delete operations, avoids raw SQL DELETE strings, handles missing records, and tests the behavior.",
+    "assertions": [
+      "delete uses SQLAlchemy ORM",
+      "related detection objects are removed",
+      "missing record behavior is handled",
+      "no raw DELETE SQL is used",
+      "tests cover deletion"
+    ]
+  }
+]
