@@ -22,6 +22,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chat_models import init_chat_model
+from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -94,16 +95,22 @@ TOOLS = {
 
 # Parse MODEL string (format: "provider:model_id")
 provider, model_id = MODEL.split(":", 1)
-
+rate_limiter = InMemoryRateLimiter(
+    requests_per_second=0.2,
+    check_every_n_seconds=0.1,
+    max_bucket_size=2,
+)
 if provider == "bedrock":
+    
     llm = init_chat_model(
         model_id,
         model_provider="bedrock",
         temperature=0,
         region_name="us-east-1",
+        rate_limiter=rate_limiter,
     )
 else:
-    llm = init_chat_model(MODEL, temperature=0)
+    llm = init_chat_model(MODEL, temperature=0, rate_limiter=rate_limiter)
 
 MODEL_PROFILE = getattr(llm, "profile", None) or {}
 REQUIRED_FEATURES = ["tool_calling"]
