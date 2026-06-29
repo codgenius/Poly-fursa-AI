@@ -11,4 +11,8 @@ langchain[google-genai]
 
 httpx
 pydantic
+
+# Testing
+pytest
+pytest-cov
 langchain-aws
