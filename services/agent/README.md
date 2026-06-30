@@ -32,6 +32,8 @@ cp .env.example .env
 | `GOOGLE_API_KEY` | - | Required for Google models |
 | `MODEL` | `claude-sonnet-4-6` | Any model string supported by `init_chat_model` |
 | `YOLO_SERVICE_URL` | `http://localhost:8080` | URL of the YOLO microservice |
+| `AWS_REGION` | `us-east-1` | AWS region for S3 bucket (e.g., `us-west-2`, `eu-west-1`) |
+| `AWS_S3_BUCKET` | - | Required. S3 bucket name for storing images |
 
 ## Running
 

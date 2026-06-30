@@ -12,6 +12,9 @@ langchain[google-genai]
 httpx
 pydantic
 
+# AWS
+boto3>=1.26.0
+
 # Testing
 pytest
 pytest-cov

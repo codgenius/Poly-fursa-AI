@@ -20,6 +20,9 @@ psycopg2-binary>=2.9.0
 # Metrics
 prometheus-fastapi-instrumentator>=6.0.0
 
+# AWS
+boto3>=1.26.0
+
 # Testing
 pytest>=7.0.0
 pytest-cov>=4.0.0
