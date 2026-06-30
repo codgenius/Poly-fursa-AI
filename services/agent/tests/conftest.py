@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, patch, Mock
 # Set required environment variables before any imports
 os.environ["MODEL"] = "anthropic:claude-haiku-4-5"
 os.environ["YOLO_SERVICE_URL"] = "http://localhost:8080"
+os.environ["AWS_REGION"] = "us-east-1"
+os.environ["AWS_S3_BUCKET"] = "test-bucket"
 
 # Ensure services/agent is in the path so we can import app
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -25,6 +27,14 @@ def mock_llm():
         "max_input_tokens": 200000,
     }
     return llm
+
+
+@pytest.fixture(autouse=True)
+def mock_s3_upload_global():
+    """Global mock for S3 upload to avoid actual S3 calls."""
+    with patch("s3_utils.upload_image_to_s3") as mock_s3:
+        mock_s3.return_value = "chat_id/prediction_id/original/original.jpg"
+        yield mock_s3
 
 
 @pytest.fixture

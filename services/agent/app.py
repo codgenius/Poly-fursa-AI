@@ -5,6 +5,7 @@ import logging
 import os
 from contextvars import ContextVar
 from typing import Optional
+import uuid
 
 import time
 
@@ -26,6 +27,8 @@ from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+
+from s3_utils import upload_image_to_s3
 
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
 MODEL = os.environ.get("MODEL")
@@ -50,7 +53,10 @@ SYSTEM_PROMPT = (
     "Use the available tools to extract information from images. "
 )
 
-_current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
+# Context variables for tracking image metadata during agent execution
+_current_image_s3_key: ContextVar[Optional[str]] = ContextVar("current_image_s3_key", default=None)
+_current_chat_id: ContextVar[Optional[str]] = ContextVar("current_chat_id", default=None)
+_current_prediction_id: ContextVar[Optional[str]] = ContextVar("current_prediction_id", default=None)
 _detection_result = {
     "prediction_id": None,
     "annotated_image": None,
@@ -59,27 +65,32 @@ _detection_result = {
 @tool
 def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
+    image_s3_key = _current_image_s3_key.get()
+    chat_id = _current_chat_id.get()
+    prediction_id = _current_prediction_id.get()
+    
+    if not image_s3_key:
         return json.dumps({"error": "No image was provided by the user."})
-
-    image_bytes = base64.b64decode(image_b64)
 
     with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{YOLO_SERVICE_URL}/predict",
-            files={"file": ("image.jpg", io.BytesIO(image_bytes), "image/jpeg")},
+            json={
+                "image_s3_key": image_s3_key,
+                "chat_id": chat_id,
+                "prediction_id": prediction_id,
+            }
         )
         response.raise_for_status()
 
         prediction_data = response.json()
-        prediction_id = prediction_data.get("prediction_uid")
+        prediction_id_from_response = prediction_data.get("prediction_uid")
 
-        if prediction_id:
-            _detection_result["prediction_id"] = prediction_id
+        if prediction_id_from_response:
+            _detection_result["prediction_id"] = prediction_id_from_response
 
             image_response = client.get(
-                f"{YOLO_SERVICE_URL}/prediction/{prediction_id}/image"
+                f"{YOLO_SERVICE_URL}/prediction/{prediction_id_from_response}/image"
             )
             image_response.raise_for_status()
 
@@ -222,12 +233,34 @@ app.add_middleware(
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
     lc_messages = []
-    latest_image = None
+    latest_image_s3_key = None
+    chat_id = str(uuid.uuid4())
+    prediction_id = str(uuid.uuid4())
 
     for msg in request.messages:
         if msg.role == "user":
             if msg.image_base64:
-                latest_image = msg.image_base64
+                # Upload original image to S3
+                try:
+                    image_bytes = base64.b64decode(msg.image_base64)
+                    latest_image_s3_key = upload_image_to_s3(
+                        image_bytes=image_bytes,
+                        chat_id=chat_id,
+                        prediction_id=prediction_id,
+                        original_filename="original.jpg"
+                    )
+                    logging.info(f"Image uploaded to S3: {latest_image_s3_key}")
+                except Exception as e:
+                    logging.error(f"Failed to upload image to S3: {e}")
+                    return ChatResponse(
+                        response=f"Failed to process image: {str(e)}",
+                        agent_loop_time_s=0.0,
+                        iterations=0,
+                        tools_called=[],
+                        context_limit_exceeded=False,
+                        tokens_used=TokensUsed()
+                    )
+                
                 content = msg.content + "\n[An image was uploaded. Use existing tools to analyze it according to user instructions.]"
             else:
                 content = msg.content
@@ -238,12 +271,17 @@ def chat(request: ChatRequest):
     _detection_result["prediction_id"] = None
     _detection_result["annotated_image"] = None
 
-    image_token = _current_image_b64.set(latest_image)
+    # Set context variables for the agent
+    image_token = _current_image_s3_key.set(latest_image_s3_key)
+    chat_token = _current_chat_id.set(chat_id)
+    pred_token = _current_prediction_id.set(prediction_id)
 
     try:
         return run_agent(lc_messages)
     finally:
-        _current_image_b64.reset(image_token)
+        _current_image_s3_key.reset(image_token)
+        _current_chat_id.reset(chat_token)
+        _current_prediction_id.reset(pred_token)
 
 @app.get("/health")
 def health():

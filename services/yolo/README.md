@@ -28,10 +28,14 @@ You can test the api endpoints using `curl` or Postman. See the API Endpoints se
 | Variable | Default | Description |
 |---|---|---|
 | `CONFIDENCE_THRESHOLD` | `0.5` | Minimum confidence score (0.0–1.0) for a detection to be reported. Raise it to get only high-confidence results; lower it to catch more objects. |
+| `AWS_REGION` | `us-east-1` | AWS region for S3 bucket (e.g., `us-west-2`, `eu-west-1`) |
+| `AWS_S3_BUCKET` | - | Required. S3 bucket name for storing images |
 
 Example:
 ```bash
 export CONFIDENCE_THRESHOLD=0.7
+export AWS_REGION=us-west-2
+export AWS_S3_BUCKET=my-predictions-bucket
 python app.py
 ```
 
