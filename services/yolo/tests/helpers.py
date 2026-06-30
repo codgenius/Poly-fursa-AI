@@ -1,8 +1,18 @@
 """
 Shared test helper functions
 """
-import sqlite3
+from datetime import datetime
+from models import PredictionSession, DetectionObject
 import app as app_module
+
+# Global session for test helpers
+_test_session = None
+
+
+def set_test_session(db):
+    """Set the database session for test helpers to use."""
+    global _test_session
+    _test_session = db
 
 
 def insert_test_data(uid: str, timestamp: str, labels_with_scores: list):
@@ -11,20 +21,39 @@ def insert_test_data(uid: str, timestamp: str, labels_with_scores: list):
     
     Args:
         uid: prediction session ID
-        timestamp: prediction timestamp
+        timestamp: prediction timestamp (as string in YYYY-MM-DD format, converted to datetime)
         labels_with_scores: list of (label, score) tuples
     
     Example:
         insert_test_data("session-1", "2024-01-01", [("car", 0.95), ("person", 0.87)])
     """
-    with sqlite3.connect(app_module.DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO prediction_sessions (uid, timestamp, original_image, predicted_image) VALUES (?, ?, ?, ?)",
-            (uid, timestamp, "original.jpg", "predicted.jpg")
+    if _test_session is None:
+        raise RuntimeError("Test session not set. Call set_test_session() first.")
+    
+    # Convert timestamp string to datetime object
+    try:
+        dt = datetime.strptime(timestamp, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        dt = datetime.now()
+    
+    # Create prediction session
+    prediction_session = PredictionSession(
+        uid=uid,
+        timestamp=dt,
+        original_image="original.jpg",
+        predicted_image="predicted.jpg"
+    )
+    _test_session.add(prediction_session)
+    _test_session.flush()
+    
+    # Create detection objects
+    for label, score in labels_with_scores:
+        detection = DetectionObject(
+            prediction_uid=uid,
+            label=label,
+            score=score,
+            box="[0,0,100,100]"
         )
-        for label, score in labels_with_scores:
-            conn.execute(
-                "INSERT INTO detection_objects (prediction_uid, label, score, box) VALUES (?, ?, ?, ?)",
-                (uid, label, score, "[0,0,100,100]")
-            )
-        conn.commit()
+        _test_session.add(detection)
+    
+    _test_session.commit()
