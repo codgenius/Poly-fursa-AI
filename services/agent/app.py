@@ -96,14 +96,33 @@ TOOLS = {
 provider, model_id = MODEL.split(":", 1)
 
 if provider == "bedrock":
-    llm = init_chat_model(model_id, model_provider="bedrock", temperature=0, region_name="us-east-1")
+    llm = init_chat_model(
+        model_id,
+        model_provider="bedrock",
+        temperature=0,
+        region_name="us-east-1",
+    )
 else:
     llm = init_chat_model(MODEL, temperature=0)
+
+MODEL_PROFILE = getattr(llm, "profile", None) or {}
+REQUIRED_FEATURES = ["tool_calling"]
+for feature in REQUIRED_FEATURES:
+    if not MODEL_PROFILE.get(feature, False):
+        raise SystemExit(
+            f"[ERROR] MODEL='{MODEL}' does not support required feature '{feature}'."
+        )
+
+MAX_INPUT_TOKENS = MODEL_PROFILE.get("max_input_tokens")
 
 llm_with_tools = llm.bind_tools(list(TOOLS.values()))
 
 
-
+class TokensUsed(BaseModel):
+    input: int = 0
+    output: int = 0
+    total: int = 0
+    
 class ChatMessage(BaseModel):
     role: str                           # "user" or "assistant"
     content: str
@@ -122,6 +141,7 @@ class ChatResponse(BaseModel):
     iterations: int = 0
     tools_called: list[str] = Field(default_factory=list)
     context_limit_exceeded: bool = False
+    tokens_used: TokensUsed = Field(default_factory=TokensUsed)
 
 def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
     """
@@ -130,9 +150,27 @@ def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
     start_time = time.time()
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
     tools_called: list[str] = []
+    tokens_used = TokensUsed()
 
     for iteration in range(1, max_iterations + 1):
         response: AIMessage = llm_with_tools.invoke(messages)
+        usage = getattr(response, "usage_metadata", None) or {}
+
+        tokens_used.input += usage.get("input_tokens", 0)
+        tokens_used.output += usage.get("output_tokens", 0)
+        tokens_used.total += usage.get("total_tokens", 0)
+
+        if MAX_INPUT_TOKENS and tokens_used.input >= int(MAX_INPUT_TOKENS * 0.9):
+            return ChatResponse(
+                response="Sorry, the conversation is approaching the model context limit.",
+                prediction_id=_detection_result["prediction_id"],
+                annotated_image=_detection_result["annotated_image"],
+                agent_loop_time_s=round(time.time() - start_time, 3),
+                iterations=iteration,
+                tools_called=tools_called,
+                context_limit_exceeded=True,
+                tokens_used=tokens_used,
+            )
         messages.append(response)
 
         if not response.tool_calls:
@@ -144,6 +182,7 @@ def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
                 iterations=iteration,
                 tools_called=tools_called,
                 context_limit_exceeded=False,
+                tokens_used=tokens_used,
             )
 
         for tool_call in response.tool_calls:
@@ -162,6 +201,7 @@ def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
         iterations=max_iterations,
         tools_called=tools_called,
         context_limit_exceeded=True,
+        tokens_used=tokens_used,
     )
 app = FastAPI(title="Vision Agent")
 
