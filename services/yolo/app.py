@@ -12,11 +12,13 @@ import time
 import signal
 import threading
 import sys
+import io
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 from models import PredictionSession, DetectionObject
 from db import init_db, get_db
+from s3_utils import download_image_from_s3, upload_image_to_s3
 
 is_shutting_down = False
 
@@ -73,31 +75,95 @@ class PredictResponse(BaseModel):
     detection_count: int
     labels: List[str]
     time_took: float
-    
+
+
+class PredictRequest(BaseModel):
+    """Request model for S3-based image prediction"""
+    image_s3_key: str
+    chat_id: str
+    prediction_id: str
+
+
 @app.post("/predict", response_model=PredictResponse)
-def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def predict(
+    request: Request,
+    file: Optional[UploadFile] = File(None), 
+    db: Session = Depends(get_db)
+):
     """
-    Predict objects in an image
+    Predict objects in an image.
+    Supports both file upload (legacy) and S3-based image retrieval.
+    
+    For S3-based: send JSON body with image_s3_key, chat_id, and prediction_id
+    For file upload: send file as multipart/form-data
     """
     start_time = time.time()
     
-    if(file.content_type not in ["image/jpeg", "image/png", "image/jpg"]):
-        raise HTTPException(status_code=400, detail="Only image files are supported")
-    ext = os.path.splitext(file.filename)[1]
-    uid = str(uuid.uuid4())
+    image_s3_key = None
+    chat_id = None
+    prediction_id = None
+    
+    # Handle JSON body for S3-based prediction
+    if request.headers.get("content-type") == "application/json":
+        try:
+            body = await request.json()
+            image_s3_key = body.get("image_s3_key")
+            chat_id = body.get("chat_id")
+            prediction_id = body.get("prediction_id")
+        except Exception as e:
+            logging.error(f"Failed to parse JSON body: {e}")
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+    
+    # Determine image source and get image bytes
+    if image_s3_key:
+        # S3-based prediction
+        try:
+            image_bytes = download_image_from_s3(image_s3_key)
+            uid = prediction_id
+            ext = ".jpg"
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to download image from S3: {str(e)}")
+    elif file:
+        # Legacy file upload
+        if file.content_type not in ["image/jpeg", "image/png", "image/jpg"]:
+            raise HTTPException(status_code=400, detail="Only image files are supported")
+        ext = os.path.splitext(file.filename)[1]
+        uid = str(uuid.uuid4())
+        image_bytes = file.file.read()
+    else:
+        raise HTTPException(status_code=400, detail="Either 'image_s3_key' or 'file' must be provided")
+
+    # Save original image locally for processing
     original_path = os.path.join(UPLOAD_DIR, uid + ext)
     predicted_path = os.path.join(PREDICTED_DIR, uid + ext)
 
     with open(original_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+        f.write(image_bytes)
 
+    # Run prediction
     results = model(original_path, device="cpu", conf=CONFIDENCE_THRESHOLD)
 
+    # Generate annotated image
     annotated_frame = results[0].plot()  # NumPy image with boxes
     annotated_image = Image.fromarray(annotated_frame)
     annotated_image.save(predicted_path)
 
-    # Save prediction session using SQLAlchemy
+    # Convert annotated image to bytes for S3 upload if using S3
+    if image_s3_key:
+        with open(predicted_path, "rb") as f:
+            predicted_image_bytes = f.read()
+        try:
+            upload_image_to_s3(
+                image_bytes=predicted_image_bytes,
+                chat_id=chat_id,
+                prediction_id=prediction_id,
+                image_type="predicted"
+            )
+        except Exception as e:
+            logging.error(f"Failed to upload predicted image to S3: {e}")
+            # Continue anyway - we still have local storage
+
+    # Save prediction session to database
     prediction_session = PredictionSession(
         uid=uid,
         original_image=original_path,

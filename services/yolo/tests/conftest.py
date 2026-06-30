@@ -9,6 +9,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from unittest.mock import patch
+
+# Set AWS environment variables before any imports
+os.environ["AWS_REGION"] = "us-east-1"
+os.environ["AWS_S3_BUCKET"] = "test-bucket"
 
 # Add the parent directory to the path to import app
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -50,6 +55,15 @@ def setup_db(monkeypatch):
     # Cleanup
     db.close()
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def mock_s3_operations():
+    """Mock S3 operations to avoid actual S3 calls during testing."""
+    with patch("s3_utils.download_image_from_s3") as mock_download:
+        with patch("s3_utils.upload_image_to_s3") as mock_upload:
+            mock_upload.return_value = "chat_id/prediction_id/predicted/prediction_id.jpg"
+            yield
 
 
 @pytest.fixture
