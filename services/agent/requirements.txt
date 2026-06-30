@@ -11,3 +11,7 @@ langchain[google-genai]
 
 httpx
 pydantic
+
+# Testing
+pytest
+pytest-cov
