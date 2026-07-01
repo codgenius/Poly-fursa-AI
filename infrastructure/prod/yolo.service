@@ -5,6 +5,7 @@ After=network.target
 [Service]
 User=ubuntu
 WorkingDirectory=/home/ubuntu/Poly-fursa-AI/services/yolo
+EnvironmentFile=/home/ubuntu/Poly-fursa-AI/services/yolo/.env
 Environment="PATH=/home/ubuntu/Poly-fursa-AI/.venv/bin"
 ExecStart=/home/ubuntu/Poly-fursa-AI/.venv/bin/python app.py
 Restart=always

@@ -25,7 +25,10 @@ jobs:
             git pull origin dev
 
             source .venv/bin/activate
-
+            cat > services/yolo/.env <<EOF
+            AWS_REGION=us-east-1
+            AWS_S3_BUCKET=hadi-polyai-images-hk2026
+            EOF
             pip install -r services/yolo/torch-requirements.txt
             pip install -r services/yolo/requirements.txt
             pip install -r services/agent/requirements.txt
@@ -66,6 +69,10 @@ jobs:
             git pull origin main
 
             source .venv/bin/activate
+            cat > services/yolo/.env <<EOF
+            AWS_REGION=us-east-1
+            AWS_S3_BUCKET=hadi-polyai-images-hk2026
+            EOF
 
             pip install -r services/yolo/torch-requirements.txt
             pip install -r services/yolo/requirements.txt
