@@ -1,0 +1,15 @@
+[Unit]
+Description=PolyAI Frontend Service
+After=network.target poly-agent.service
+Requires=poly-agent.service
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Poly-fursa-AI/services/frontend
+Environment=NEXT_PUBLIC_AGENT_URL=http://prod.hadi.fursa.click:8000
+ExecStart=/usr/bin/npm run dev -- -H 0.0.0.0 -p 3000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
