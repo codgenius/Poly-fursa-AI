@@ -1,0 +1,13 @@
+[Unit]
+Description=Yolo Service
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Poly-fursa-AI/services/yolo
+Environment="PATH=/home/ubuntu/Poly-fursa-AI/.venv/bin"
+ExecStart=/home/ubuntu/Poly-fursa-AI/.venv/bin/python app.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

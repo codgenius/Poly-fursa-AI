@@ -1,0 +1,14 @@
+[Unit]
+Description=PolyAI Agent Service
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Poly-fursa-AI/services/agent
+EnvironmentFile=/home/ubuntu/Poly-fursa-AI/services/agent/.env
+ExecStart=/home/ubuntu/Poly-fursa-AI/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
