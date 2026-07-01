@@ -123,6 +123,22 @@ class ChatResponse(BaseModel):
     tools_called: list[str] = Field(default_factory=list)
     context_limit_exceeded: bool = False
 
+def message_content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+                elif "text" in item:
+                    text_parts.append(item["text"])
+        return "\n".join(part for part in text_parts if part)
+
+    return str(content)
+
 def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
     """
     Simple ReAct loop with max-iterations guard and structured metadata.
@@ -137,7 +153,7 @@ def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
 
         if not response.tool_calls:
             return ChatResponse(
-                response=response.content,
+                response=message_content_to_text(response.content),
                 prediction_id=_detection_result["prediction_id"],
                 annotated_image=_detection_result["annotated_image"],
                 agent_loop_time_s=round(time.time() - start_time, 3),
