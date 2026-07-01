@@ -223,9 +223,15 @@ def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
     )
 app = FastAPI(title="Vision Agent")
 
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=allowed_origins,
     allow_methods=["POST", "GET"],
     allow_headers=["Content-Type"],
 )

@@ -6,6 +6,7 @@ After=network.target
 User=ubuntu
 WorkingDirectory=/home/ubuntu/Poly-fursa-AI/services/agent
 EnvironmentFile=/home/ubuntu/Poly-fursa-AI/services/agent/.env
+Environment=ALLOWED_ORIGINS=http://prod.hadi.fursa.click:3000
 ExecStart=/home/ubuntu/Poly-fursa-AI/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
