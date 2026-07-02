@@ -1,0 +1,69 @@
+services:
+  yolo:
+    image: hadikhier/yolo-service:0.0.1
+    ports:
+      - "8080:8080"
+    environment:
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET: hadi-polyai-images-hk2026
+    networks:
+      - polyai-net
+
+  agent:
+    image: hadikhier/agent-service:0.0.2
+    ports:
+      - "8000:8000"
+    environment:
+      YOLO_SERVICE_URL: http://yolo:8080
+      MODEL: bedrock:amazon.nova-micro-v1:0
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET: hadi-polyai-images-hk2026
+    networks:
+      - polyai-net
+    depends_on:
+      - yolo
+
+  frontend:
+    image: hadikhier/frontend-service:0.0.1
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_AGENT_URL: http://localhost:8000
+    networks:
+      - polyai-net
+    depends_on:
+      - agent
+
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    networks:
+      - monitoring-net
+      - polyai-net
+    depends_on:
+      - yolo
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana-storage:/var/lib/grafana
+    networks:
+      - monitoring-net
+    depends_on:
+      - prometheus
+
+volumes:
+  grafana-storage:
+  prometheus-data:
+
+networks:
+  polyai-net:
+    driver: bridge
+  monitoring-net:
+    driver: bridge
