@@ -3,40 +3,53 @@ Shared pytest configuration and fixtures for all tests.
 See CONFTEST_EXPLAINED.md for detailed explanation.
 """
 import os
-import sqlite3
+import sys
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+# Add the parent directory to the path to import app
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import app as app_module
 from app import app, init_db
+from models import Base
+from db import get_db
+from tests.helpers import set_test_session
 
 
 @pytest.fixture(autouse=True)
 def setup_db(monkeypatch):
     """Set up in-memory database for each test. See CONFTEST_EXPLAINED.md for details."""
-    db_file = "file:memdb?mode=memory&cache=shared"
-    real_connect = sqlite3.connect
+    # Create in-memory SQLite database for testing
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     
-    def patched_connect(database, *args, **kwargs):
-        if database == db_file:
-            kwargs["uri"] = True
-        return real_connect(database, *args, **kwargs)
+    Base.metadata.create_all(bind=engine)
     
-    monkeypatch.setattr("app.DB_PATH", db_file)
-    monkeypatch.setattr(sqlite3, "connect", patched_connect)
+    # Create a session for this test
+    db = TestingSessionLocal()
+    set_test_session(db)
     
-    keeper_conn = sqlite3.connect(db_file, uri=True)
-    init_db()
+    def override_get_db():
+        try:
+            yield db
+        finally:
+            pass  # Don't close db yet, it's needed for cleanup
     
-    yield  # TEST RUNS HERE
+    app.dependency_overrides[get_db] = override_get_db
     
-    # Cleanup: drop tables for isolation
-    with sqlite3.connect(db_file, uri=True) as conn:
-        conn.execute("DROP TABLE IF EXISTS detection_objects")
-        conn.execute("DROP TABLE IF EXISTS prediction_sessions")
-        conn.commit()
+    yield db  # TEST RUNS HERE
     
-    keeper_conn.close()
+    # Cleanup
+    db.close()
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
