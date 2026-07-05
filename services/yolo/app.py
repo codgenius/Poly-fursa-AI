@@ -15,10 +15,13 @@ import sys
 import io
 from pydantic import BaseModel
 from typing import List, Optional
+from typing import List, Optional
 
 from models import PredictionSession, DetectionObject
 from db import init_db, get_db
 from s3_utils import download_image_from_s3, upload_image_to_s3
+from dotenv import load_dotenv
+load_dotenv()
 
 is_shutting_down = False
 
