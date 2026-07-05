@@ -1,11 +1,12 @@
 # services/img-proc-mcp/app.py
 import base64
 import io
+import json
 import numpy as np
 from mcp.server.fastmcp import FastMCP
 from PIL import Image, ImageFilter
 
-mcp = FastMCP("img-proc")
+mcp = FastMCP("img-proc", host="0.0.0.0", port=9000)
 
 def _decode(b64: str) -> Image.Image:
     return Image.open(io.BytesIO(base64.b64decode(b64)))
@@ -91,4 +92,4 @@ def add_noise(image_b64: str, amount: float = 0.1) -> str:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="streamable-http")

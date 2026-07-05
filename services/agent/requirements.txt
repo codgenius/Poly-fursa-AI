@@ -9,6 +9,10 @@ langchain[openai]
 langchain[anthropic]
 langchain[google-genai]
 
+# MCP client
+langchain-mcp-adapters
+mcp[cli]>=0.6.0
+
 httpx
 pydantic
 

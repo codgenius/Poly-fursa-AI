@@ -29,6 +29,8 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from s3_utils import upload_image_to_s3
+from image_utils import b64_to_bytes, crop_image_region, paste_image_region, bytes_to_b64
+from mcp_client import MCPClient
 
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
 MODEL = os.environ.get("MODEL")
@@ -50,13 +52,17 @@ if MODEL not in ALLOWED_MODELS:
 
 SYSTEM_PROMPT = (
     "You are an AI vision assistant. You help users understand and analyze images. "
-    "Use the available tools to extract information from images. "
+    "You can detect objects using detect_objects, blur specific objects using blur_object, "
+    "and crop specific objects using crop_object. "
+    "Use the available tools to extract information from images and perform image processing tasks. "
 )
 
 # Context variables for tracking image metadata during agent execution
 _current_image_s3_key: ContextVar[Optional[str]] = ContextVar("current_image_s3_key", default=None)
 _current_chat_id: ContextVar[Optional[str]] = ContextVar("current_chat_id", default=None)
 _current_prediction_id: ContextVar[Optional[str]] = ContextVar("current_prediction_id", default=None)
+_current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
+_current_detections: ContextVar[list] = ContextVar("current_detections", default=[])
 _detection_result = {
     "prediction_id": None,
     "annotated_image": None,
@@ -96,12 +102,164 @@ def detect_objects() -> str:
 
             annotated_image_b64 = base64.b64encode(image_response.content).decode("utf-8")
             _detection_result["annotated_image"] = annotated_image_b64
+            
+            # Store annotated image in context for blur_object/crop_object to use
+            _current_image_b64.set(annotated_image_b64)
+        
+        # Parse detections from YOLO response and store in context
+        detections = []
+        if "detections" in prediction_data:
+            for idx, detection in enumerate(prediction_data["detections"]):
+                detections.append({
+                    "id": idx,
+                    "label": detection.get("label", "unknown"),
+                    "bbox": (
+                        detection.get("x1", 0),
+                        detection.get("y1", 0),
+                        detection.get("x2", 0),
+                        detection.get("y2", 0),
+                    ),
+                    "confidence": detection.get("confidence", 0.0),
+                })
+        _current_detections.set(detections)
 
     return json.dumps(prediction_data)
 
+def _validate_and_get_detection(object_id: int):
+    """Validate context and get detection object.
+    
+    Returns:
+        tuple: (detection_dict, label_str) on success
+        str: JSON error response on failure
+    """
+    image_b64 = _current_image_b64.get()
+    detections = _current_detections.get()
+    
+    if not image_b64:
+        return json.dumps({"error": "No image available. Please detect objects first."})
+    
+    if not detections:
+        return json.dumps({"error": "No detections available. Please detect objects first."})
+    
+    if object_id < 0 or object_id >= len(detections):
+        return json.dumps({"error": f"Invalid object_id {object_id}. Available objects: 0-{len(detections)-1}"})
+    
+    detection = detections[object_id]
+    return detection, detection["label"]
+
+def _update_image_and_respond(modified_image_b64: str, label: str, object_id: int, action: str, details: str = ""):
+    """Update context and detection result, return success response.
+    
+    Args:
+        modified_image_b64: Updated image in base64
+        label: Object label for message
+        object_id: Object ID for message
+        action: Action name (e.g., "blurred", "cropped")
+        details: Additional details for message (e.g., "with radius 5.0")
+    
+    Returns:
+        str: JSON success response
+    """
+    _current_image_b64.set(modified_image_b64)
+    _detection_result["annotated_image"] = modified_image_b64
+    
+    message = f"Successfully {action} {label} (object #{object_id})"
+    if details:
+        message += f" {details}"
+    
+    return json.dumps({
+        "success": True,
+        "message": message
+    })
+
+@tool
+def blur_object(object_id: int, radius: float = 2.0) -> str:
+    """Blur a detected object in the image. Specify the object ID and blur radius (default 2.0)."""
+    # Validate and get detection
+    result = _validate_and_get_detection(object_id)
+    if isinstance(result, str):
+        return result  # Error response
+    detection, label = result
+    bbox = detection["bbox"]
+    
+    image_b64 = _current_image_b64.get()
+    
+    try:
+        # Convert image from base64 to bytes
+        full_image_bytes = b64_to_bytes(image_b64)
+        
+        # Crop the region
+        cropped_bytes = crop_image_region(full_image_bytes, bbox)
+        
+        # Convert cropped region to base64
+        cropped_b64 = bytes_to_b64(cropped_bytes)
+        
+        # Call MCP blur
+        client = MCPClient()
+        blurred_b64 = client.blur(cropped_b64, radius)
+        
+        # Convert blurred result back to bytes
+        blurred_bytes = b64_to_bytes(blurred_b64)
+        
+        # Paste back into full image
+        modified_image_bytes = paste_image_region(full_image_bytes, blurred_bytes, bbox)
+        
+        # Convert result back to base64
+        modified_image_b64 = bytes_to_b64(modified_image_bytes)
+        
+        # Update and respond
+        return _update_image_and_respond(
+            modified_image_b64,
+            label,
+            object_id,
+            "blurred",
+            f"with radius {radius}"
+        )
+    
+    except Exception as e:
+        return json.dumps({"error": f"Failed to blur object: {str(e)}"})
+
+@tool
+def crop_object(object_id: int, left_offset: int = 0, top_offset: int = 0, right_offset: int = 0, bottom_offset: int = 0) -> str:
+    """Crop a detected object from the image. Specify the object ID and optional pixel offsets to expand/shrink the crop region."""
+    # Validate and get detection
+    result = _validate_and_get_detection(object_id)
+    if isinstance(result, str):
+        return result  # Error response
+    detection, label = result
+    bbox = detection["bbox"]
+    
+    image_b64 = _current_image_b64.get()
+    
+    # Apply offsets to bbox: (x1, y1, x2, y2)
+    x1, y1, x2, y2 = bbox
+    left = x1 - left_offset
+    top = y1 - top_offset
+    right = x2 + right_offset
+    bottom = y2 + bottom_offset
+    
+    try:
+        # Get current image and crop region
+        client = MCPClient()
+        cropped_b64 = client.crop(image_b64, left, top, right, bottom)
+        
+        # Update and respond
+        return _update_image_and_respond(
+            cropped_b64,
+            label,
+            object_id,
+            "cropped",
+            f"to region [{left}, {top}, {right}, {bottom}]"
+        )
+    
+    except Exception as e:
+        return json.dumps({"error": f"Failed to crop object: {str(e)}"})
+
 # Registry: map tool name -> tool function
 TOOLS = {
-    detect_objects.name: detect_objects
+    detect_objects.name: detect_objects,
+    blur_object.name: blur_object,
+    crop_object.name: crop_object,
 }
 
 # Parse MODEL string (format: "provider:model_id")
@@ -291,6 +449,8 @@ def chat(request: ChatRequest):
     image_token = _current_image_s3_key.set(latest_image_s3_key)
     chat_token = _current_chat_id.set(chat_id)
     pred_token = _current_prediction_id.set(prediction_id)
+    image_b64_token = _current_image_b64.set(None)  # Will be set by detect_objects
+    detections_token = _current_detections.set([])  # Will be populated by detect_objects
 
     try:
         return run_agent(lc_messages)
@@ -298,6 +458,8 @@ def chat(request: ChatRequest):
         _current_image_s3_key.reset(image_token)
         _current_chat_id.reset(chat_token)
         _current_prediction_id.reset(pred_token)
+        _current_image_b64.reset(image_b64_token)
+        _current_detections.reset(detections_token)
 
 @app.get("/health")
 def health():
