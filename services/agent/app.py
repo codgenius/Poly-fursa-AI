@@ -341,12 +341,45 @@ def blur_image(radius: float = 2.0) -> str:
         logging.error(f"❌ blur_image failed: {str(e)}", exc_info=True)
         return json.dumps({"error": f"Failed to blur image: {str(e)}"})
 
+@tool
+def rotate_image(angle: float) -> str:
+    """Rotate the entire image. Specify the rotation angle in degrees."""
+    image_b64 = _current_image_b64.get()
+    
+    if not image_b64:
+        return json.dumps({"error": "No image available. Please provide an image first."})
+    
+    try:
+        logging.info(f"🔵 rotate_image: Calling MCP rotate with angle={angle}")
+        logging.info(f"   Input image size: {len(image_b64)} chars")
+        
+        # Call MCP service to rotate the full image
+        client = MCPClient()
+        rotated_b64 = client.rotate(image_b64, angle)
+        
+        logging.info(f"   Output image size: {len(rotated_b64)} chars")
+        logging.info(f"   ✅ MCP rotate completed successfully")
+        
+        # Update all image state with the rotated result
+        _set_current_image(rotated_b64)
+        
+        return json.dumps({
+            "success": True,
+            "message": f"Successfully rotated the entire image by {angle} degrees",
+            "image_updated": True
+        })
+    
+    except Exception as e:
+        logging.error(f"❌ rotate_image failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to rotate image: {str(e)}"})
+
 # Registry: map tool name -> tool function
 TOOLS = {
     detect_objects.name: detect_objects,
     blur_object.name: blur_object,
     crop_object.name: crop_object,
     blur_image.name: blur_image,
+    rotate_image.name: rotate_image,
 }
 
 # Parse MODEL string (format: "provider:model_id")
