@@ -15,8 +15,10 @@ DB_NAME = os.environ.get("DB_NAME", "predictions")
 if DB_BACKEND == "postgres":
     DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 else:
-    # Default to SQLite
-    DATABASE_URL = f"sqlite:///{DB_NAME}.db"
+    # Default to SQLite - use absolute path to avoid ambiguity
+    db_dir = os.path.dirname(os.path.abspath(__file__))
+    db_path = os.path.join(db_dir, f"{DB_NAME}.db")
+    DATABASE_URL = f"sqlite:///{db_path}"
 
 # Create engine with appropriate settings
 if DB_BACKEND == "postgres":
