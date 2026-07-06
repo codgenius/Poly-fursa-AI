@@ -297,11 +297,45 @@ def crop_object(object_id: int, left_offset: int = 0, top_offset: int = 0, right
     except Exception as e:
         return json.dumps({"error": f"Failed to crop object: {str(e)}"})
 
+@tool
+def blur_image(radius: float = 2.0) -> str:
+    """Apply Gaussian blur to the entire image. Specify the blur radius (default 2.0 pixels)."""
+    image_b64 = _current_image_b64.get()
+    
+    if not image_b64:
+        return json.dumps({"error": "No image available. Please provide an image first."})
+    
+    try:
+        logging.info(f"🔵 blur_image: Calling MCP blur with radius={radius}")
+        logging.info(f"   Input image size: {len(image_b64)} chars")
+        
+        # Call MCP service to blur the full image
+        client = MCPClient()
+        blurred_b64 = client.blur(image_b64, radius)
+        
+        logging.info(f"   Output image size: {len(blurred_b64)} chars")
+        logging.info(f"   ✅ MCP blur completed successfully")
+        
+        # Update context with the blurred image
+        _current_image_b64.set(blurred_b64)
+        _detection_result["annotated_image"] = blurred_b64
+        
+        return json.dumps({
+            "success": True,
+            "message": f"Successfully blurred the entire image with radius {radius}",
+            "image_updated": True
+        })
+    
+    except Exception as e:
+        logging.error(f"❌ blur_image failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to blur image: {str(e)}"})
+
 # Registry: map tool name -> tool function
 TOOLS = {
     detect_objects.name: detect_objects,
     blur_object.name: blur_object,
     crop_object.name: crop_object,
+    blur_image.name: blur_image,
 }
 
 # Parse MODEL string (format: "provider:model_id")
