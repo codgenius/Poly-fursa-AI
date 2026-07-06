@@ -83,7 +83,10 @@ def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
     image_s3_key = _current_image_s3_key.get()
     chat_id = _current_chat_id.get()
-    prediction_id = _current_prediction_id.get()
+    
+    # Generate fresh prediction_id for this detection call (not reusing per-request one)
+    # This ensures YOLO doesn't see duplicate UIDs if detect_objects is called multiple times
+    detection_prediction_id = str(uuid.uuid4())
     
     if not image_s3_key:
         return json.dumps({"error": "No image was provided by the user."})
@@ -92,7 +95,7 @@ def detect_objects() -> str:
         payload = {
             "image_s3_key": image_s3_key,
             "chat_id": chat_id,
-            "prediction_id": prediction_id,
+            "prediction_id": detection_prediction_id,
         }
         logging.info(f"🔍 DEBUG: Sending request to YOLO")
         logging.info(f"   YOLO_SERVICE_URL: {YOLO_SERVICE_URL}")
@@ -152,6 +155,16 @@ def detect_objects() -> str:
 
     return json.dumps(prediction_data)
 
+def _set_current_image(image_b64: str):
+    """Update all image state tracking with a modified image.
+    
+    Ensures consistency across ContextVars and _detection_result dict,
+    which is necessary to persist changes across tool context boundaries (Phase 5).
+    """
+    _current_image_b64.set(image_b64)
+    _detection_result["annotated_image"] = image_b64
+    _detection_result["final_image_b64"] = image_b64
+
 def _validate_and_get_detection(object_id: int):
     """Validate context and get detection object.
     
@@ -187,8 +200,7 @@ def _update_image_and_respond(modified_image_b64: str, label: str, object_id: in
     Returns:
         str: JSON success response
     """
-    _current_image_b64.set(modified_image_b64)
-    _detection_result["annotated_image"] = modified_image_b64
+    _set_current_image(modified_image_b64)
     
     message = f"Successfully {action} {label} (object #{object_id})"
     if details:
@@ -316,9 +328,8 @@ def blur_image(radius: float = 2.0) -> str:
         logging.info(f"   Output image size: {len(blurred_b64)} chars")
         logging.info(f"   ✅ MCP blur completed successfully")
         
-        # Update context with the blurred image
-        _current_image_b64.set(blurred_b64)
-        _detection_result["annotated_image"] = blurred_b64
+        # Update all image state with the blurred result
+        _set_current_image(blurred_b64)
         
         return json.dumps({
             "success": True,
@@ -561,6 +572,10 @@ def chat(request: ChatRequest):
 
     _detection_result["prediction_id"] = None
     _detection_result["annotated_image"] = None
+    _detection_result["final_image_b64"] = None  # Phase 5: Store final image after tool modifications
+
+    # Phase 5: Store initial image for change detection
+    initial_image_b64 = current_image_b64
 
     # Set context variables for the agent
     image_token = _current_image_s3_key.set(latest_image_s3_key)
@@ -585,6 +600,35 @@ def chat(request: ChatRequest):
             if "detections" not in _chat_image_state[chat_id]:
                 _chat_image_state[chat_id]["detections"] = []
             logging.info(f"✅ Detections state consistent: {len(_chat_image_state[chat_id]['detections'])} items in state")
+        
+        # Phase 5: Persist final working image if it changed during the request
+        # Tools store their final output in _detection_result["final_image_b64"] to bypass ContextVar context isolation
+        final_image_b64 = _detection_result.get("final_image_b64") or _current_image_b64.get()
+        initial_len = len(initial_image_b64 or '')
+        final_len = len(final_image_b64 or '')
+        logging.info(f"📊 Phase 5 image comparison: initial={initial_len} chars, final={final_len} chars, equal={initial_image_b64 == final_image_b64}")
+        if final_image_b64 and final_image_b64 != initial_image_b64:
+            try:
+                logging.info(f"🖼️ Image was modified during request: {initial_len} → {final_len} chars")
+                image_bytes = base64.b64decode(final_image_b64)
+                
+                # Generate fresh UUID for modified image upload
+                # Not a YOLO prediction_id; upload_image_to_s3 uses this parameter for S3 key construction.
+                modified_upload_id = str(uuid.uuid4())
+                
+                new_s3_key = upload_image_to_s3(
+                    image_bytes=image_bytes,
+                    chat_id=chat_id,
+                    prediction_id=modified_upload_id,
+                    original_filename="working.jpg"
+                )
+                _chat_image_state[chat_id]["current_s3_key"] = new_s3_key
+                logging.info(f"✅ Persisted modified image to S3: {new_s3_key}")
+            except Exception as e:
+                logging.error(f"❌ Failed to persist modified image: {e}", exc_info=True)
+                # Continue without S3 persistence - don't fail the whole request
+        else:
+            logging.info(f"🔵 Image unchanged: no persistence needed (final_image_b64 is None: {final_image_b64 is None})")
         
         return response
     finally:
