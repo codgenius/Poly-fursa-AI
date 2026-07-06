@@ -28,7 +28,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from s3_utils import upload_image_to_s3
+from s3_utils import upload_image_to_s3, download_image_from_s3
 from image_utils import b64_to_bytes, crop_image_region, paste_image_region, bytes_to_b64
 from mcp_client import MCPClient
 
@@ -447,7 +447,9 @@ app.add_middleware(
 def chat(request: ChatRequest):
     lc_messages = []
     latest_image_s3_key = None
+    current_image_b64 = None  # Will hold base64 image data
     prediction_id = str(uuid.uuid4())
+    new_image_uploaded = False  # Track if a new image was uploaded in this request
     
     # Restore or create chat session
     if request.chat_id and request.chat_id in _chat_image_state:
@@ -463,7 +465,8 @@ def chat(request: ChatRequest):
     for msg in request.messages:
         if msg.role == "user":
             if msg.image_base64:
-                # Upload original image to S3
+                # New image uploaded - this replaces any previous image
+                new_image_uploaded = True
                 try:
                     image_bytes = base64.b64decode(msg.image_base64)
                     latest_image_s3_key = upload_image_to_s3(
@@ -477,6 +480,12 @@ def chat(request: ChatRequest):
                     # Store original and current S3 keys in chat state
                     _chat_image_state[chat_id]["original_s3_key"] = latest_image_s3_key
                     _chat_image_state[chat_id]["current_s3_key"] = latest_image_s3_key
+                    
+                    # Clear detections for new image
+                    _chat_image_state[chat_id]["detections"] = []
+                    
+                    # Convert uploaded image to base64 for immediate use (no re-download)
+                    current_image_b64 = msg.image_base64
                 except Exception as e:
                     logging.error(f"Failed to upload image to S3: {e}")
                     return ChatResponse(
@@ -495,6 +504,17 @@ def chat(request: ChatRequest):
         else:
             lc_messages.append(AIMessage(content=msg.content))
 
+    # If no new image was uploaded but we have a current_s3_key, download it for restoration
+    if not new_image_uploaded and latest_image_s3_key:
+        try:
+            logging.info(f"Restoring image from S3: {latest_image_s3_key}")
+            image_bytes = download_image_from_s3(latest_image_s3_key)
+            current_image_b64 = bytes_to_b64(image_bytes)
+            logging.info(f"Image restored from S3 (size: {len(current_image_b64)} chars)")
+        except Exception as e:
+            logging.error(f"Failed to restore image from S3: {e}")
+            # Continue without image rather than failing
+
     _detection_result["prediction_id"] = None
     _detection_result["annotated_image"] = None
 
@@ -502,7 +522,7 @@ def chat(request: ChatRequest):
     image_token = _current_image_s3_key.set(latest_image_s3_key)
     chat_token = _current_chat_id.set(chat_id)
     pred_token = _current_prediction_id.set(prediction_id)
-    image_b64_token = _current_image_b64.set(None)  # Will be set by detect_objects
+    image_b64_token = _current_image_b64.set(current_image_b64)  # Set with restored or uploaded image
     detections_token = _current_detections.set([])  # Will be populated by detect_objects
 
     try:

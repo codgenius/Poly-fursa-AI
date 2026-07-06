@@ -54,3 +54,32 @@ def upload_image_to_s3(
         logger.error(f"Failed to upload image to S3: {e}")
         raise
 
+
+def download_image_from_s3(s3_key: str) -> bytes:
+    """
+    Download an image from S3 and return the binary data.
+    
+    Args:
+        s3_key: S3 object key (path)
+    
+    Returns:
+        Image binary data
+    """
+    aws_region = os.environ.get("AWS_REGION", "us-east-1")
+    aws_bucket = os.environ.get("AWS_S3_BUCKET")
+    
+    if not aws_bucket:
+        raise ValueError(
+            "AWS_S3_BUCKET environment variable must be set to use S3 image storage."
+        )
+    
+    try:
+        s3_client = boto3.client("s3", region_name=aws_region)
+        response = s3_client.get_object(Bucket=aws_bucket, Key=s3_key)
+        image_bytes = response["Body"].read()
+        logger.info(f"Downloaded image from S3: s3://{aws_bucket}/{s3_key}")
+        return image_bytes
+    except ClientError as e:
+        logger.error(f"Failed to download image from S3: {e}")
+        raise
+
