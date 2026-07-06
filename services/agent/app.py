@@ -373,6 +373,41 @@ def rotate_image(angle: float) -> str:
         logging.error(f"❌ rotate_image failed: {str(e)}", exc_info=True)
         return json.dumps({"error": f"Failed to rotate image: {str(e)}"})
 
+@tool
+def flip_image(direction: str) -> str:
+    """Flip the entire image horizontally or vertically. Direction must be 'horizontal' or 'vertical'."""
+    if direction not in ["horizontal", "vertical"]:
+        return json.dumps({"error": f"Invalid direction '{direction}'. Must be 'horizontal' or 'vertical'."})
+    
+    image_b64 = _current_image_b64.get()
+    
+    if not image_b64:
+        return json.dumps({"error": "No image available. Please provide an image first."})
+    
+    try:
+        logging.info(f"🔵 flip_image: Calling MCP flip with direction={direction}")
+        logging.info(f"   Input image size: {len(image_b64)} chars")
+        
+        # Call MCP service to flip the full image
+        client = MCPClient()
+        flipped_b64 = client.flip(image_b64, direction)
+        
+        logging.info(f"   Output image size: {len(flipped_b64)} chars")
+        logging.info(f"   ✅ MCP flip completed successfully")
+        
+        # Update all image state with the flipped result
+        _set_current_image(flipped_b64)
+        
+        return json.dumps({
+            "success": True,
+            "message": f"Successfully flipped the entire image {direction}",
+            "image_updated": True
+        })
+    
+    except Exception as e:
+        logging.error(f"❌ flip_image failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to flip image: {str(e)}"})
+
 # Registry: map tool name -> tool function
 TOOLS = {
     detect_objects.name: detect_objects,
@@ -380,6 +415,7 @@ TOOLS = {
     crop_object.name: crop_object,
     blur_image.name: blur_image,
     rotate_image.name: rotate_image,
+    flip_image.name: flip_image,
 }
 
 # Parse MODEL string (format: "provider:model_id")
