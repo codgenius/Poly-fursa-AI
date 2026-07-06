@@ -443,6 +443,41 @@ def resize_image(width: int, height: int) -> str:
         logging.error(f"❌ resize_image failed: {str(e)}", exc_info=True)
         return json.dumps({"error": f"Failed to resize image: {str(e)}"})
 
+@tool
+def add_noise_image(amount: float = 0.1) -> str:
+    """Add noise to the entire image. Amount must be between 0.0 and 1.0."""
+    if not isinstance(amount, (int, float)) or amount < 0.0 or amount > 1.0:
+        return json.dumps({"error": "Amount must be a number between 0.0 and 1.0."})
+    
+    image_b64 = _current_image_b64.get()
+    
+    if not image_b64:
+        return json.dumps({"error": "No image available. Please provide an image first."})
+    
+    try:
+        logging.info(f"🔵 add_noise_image: Calling MCP add_noise with amount={amount}")
+        logging.info(f"   Input image size: {len(image_b64)} chars")
+        
+        # Call MCP service to add noise to the full image
+        client = MCPClient()
+        noisy_b64 = client.add_noise(image_b64, amount)
+        
+        logging.info(f"   Output image size: {len(noisy_b64)} chars")
+        logging.info(f"   ✅ MCP add_noise completed successfully")
+        
+        # Update all image state with the noisy result
+        _set_current_image(noisy_b64)
+        
+        return json.dumps({
+            "success": True,
+            "message": f"Successfully added noise to the entire image with amount {amount}",
+            "image_updated": True
+        })
+    
+    except Exception as e:
+        logging.error(f"❌ add_noise_image failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to add noise to image: {str(e)}"})
+
 # Registry: map tool name -> tool function
 TOOLS = {
     detect_objects.name: detect_objects,
@@ -452,6 +487,7 @@ TOOLS = {
     rotate_image.name: rotate_image,
     flip_image.name: flip_image,
     resize_image.name: resize_image,
+    add_noise_image.name: add_noise_image,
 }
 
 # Parse MODEL string (format: "provider:model_id")
