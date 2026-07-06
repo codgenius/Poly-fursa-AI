@@ -408,6 +408,41 @@ def flip_image(direction: str) -> str:
         logging.error(f"❌ flip_image failed: {str(e)}", exc_info=True)
         return json.dumps({"error": f"Failed to flip image: {str(e)}"})
 
+@tool
+def resize_image(width: int, height: int) -> str:
+    """Resize the entire image to specified dimensions. Width and height must be positive integers."""
+    if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+        return json.dumps({"error": "Width and height must be positive integers."})
+    
+    image_b64 = _current_image_b64.get()
+    
+    if not image_b64:
+        return json.dumps({"error": "No image available. Please provide an image first."})
+    
+    try:
+        logging.info(f"🔵 resize_image: Calling MCP resize with width={width}, height={height}")
+        logging.info(f"   Input image size: {len(image_b64)} chars")
+        
+        # Call MCP service to resize the full image
+        client = MCPClient()
+        resized_b64 = client.resize(image_b64, width, height)
+        
+        logging.info(f"   Output image size: {len(resized_b64)} chars")
+        logging.info(f"   ✅ MCP resize completed successfully")
+        
+        # Update all image state with the resized result
+        _set_current_image(resized_b64)
+        
+        return json.dumps({
+            "success": True,
+            "message": f"Successfully resized the entire image to {width}x{height}",
+            "image_updated": True
+        })
+    
+    except Exception as e:
+        logging.error(f"❌ resize_image failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to resize image: {str(e)}"})
+
 # Registry: map tool name -> tool function
 TOOLS = {
     detect_objects.name: detect_objects,
@@ -416,6 +451,7 @@ TOOLS = {
     blur_image.name: blur_image,
     rotate_image.name: rotate_image,
     flip_image.name: flip_image,
+    resize_image.name: resize_image,
 }
 
 # Parse MODEL string (format: "provider:model_id")
