@@ -74,6 +74,7 @@ _chat_image_state: dict[str, dict] = {}
 #   "chat_id": {
 #       "original_s3_key": str,
 #       "current_s3_key": str,
+#       "detections": list,  # Cached YOLO detections from latest detect_objects call
 #   }
 # }
 
@@ -143,7 +144,11 @@ def detect_objects() -> str:
                     ),
                     "confidence": detection.get("confidence", 0.0),
                 })
+        
         _current_detections.set(detections)
+        logging.info(f"✅ Parsed {len(detections)} detections and stored in _current_detections context")
+        for i, det in enumerate(detections):
+            logging.info(f"   [{i}] {det['label']} (confidence: {det['confidence']:.2f})")
 
     return json.dumps(prediction_data)
 
@@ -450,17 +455,21 @@ def chat(request: ChatRequest):
     current_image_b64 = None  # Will hold base64 image data
     prediction_id = str(uuid.uuid4())
     new_image_uploaded = False  # Track if a new image was uploaded in this request
+    restored_detections = []  # Detections to restore from previous request
     
     # Restore or create chat session
     if request.chat_id and request.chat_id in _chat_image_state:
         # Follow-up request: restore existing session
         chat_id = request.chat_id
         latest_image_s3_key = _chat_image_state[chat_id].get("current_s3_key")
+        restored_detections = _chat_image_state[chat_id].get("detections", [])
+        logging.info(f"🔄 Restored session {chat_id}: current_s3_key={latest_image_s3_key}, detections={len(restored_detections)}")
     else:
         # New request: generate new chat_id
         chat_id = str(uuid.uuid4())
         latest_image_s3_key = None
         _chat_image_state[chat_id] = {}  # Initialize state for new chat
+        logging.info(f"✨ Created new chat session: {chat_id}")
 
     for msg in request.messages:
         if msg.role == "user":
@@ -483,6 +492,7 @@ def chat(request: ChatRequest):
                     
                     # Clear detections for new image
                     _chat_image_state[chat_id]["detections"] = []
+                    restored_detections = []
                     
                     # Convert uploaded image to base64 for immediate use (no re-download)
                     current_image_b64 = msg.image_base64
@@ -523,11 +533,25 @@ def chat(request: ChatRequest):
     chat_token = _current_chat_id.set(chat_id)
     pred_token = _current_prediction_id.set(prediction_id)
     image_b64_token = _current_image_b64.set(current_image_b64)  # Set with restored or uploaded image
-    detections_token = _current_detections.set([])  # Will be populated by detect_objects
+    detections_token = _current_detections.set(restored_detections)  # Restore previous detections
+    logging.info(f"📸 Set context vars: image_s3_key={latest_image_s3_key}, detections={len(restored_detections)}")
 
     try:
         response = run_agent(lc_messages)
         response.chat_id = chat_id  # Always return current chat_id
+        
+        # Persist detections back to chat state after agent completes
+        final_detections = _current_detections.get()
+        logging.info(f"🔄 Checking detection persistence: current={len(final_detections)} items, was_restored={len(restored_detections)}")
+        if final_detections:  # Only update if detections were set (e.g., by detect_objects)
+            _chat_image_state[chat_id]["detections"] = final_detections
+            logging.info(f"✅ Persisted {len(final_detections)} detections to chat state for {chat_id}")
+        else:
+            # Ensure detections key exists even if empty
+            if "detections" not in _chat_image_state[chat_id]:
+                _chat_image_state[chat_id]["detections"] = []
+            logging.info(f"✅ Detections state consistent: {len(_chat_image_state[chat_id]['detections'])} items in state")
+        
         return response
     finally:
         _current_image_s3_key.reset(image_token)
