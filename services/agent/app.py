@@ -68,6 +68,15 @@ _detection_result = {
     "annotated_image": None,
 }
 
+# Persistent chat state indexed by chat_id
+_chat_image_state: dict[str, dict] = {}
+# Structure: {
+#   "chat_id": {
+#       "original_s3_key": str,
+#       "current_s3_key": str,
+#   }
+# }
+
 @tool
 def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
@@ -79,14 +88,27 @@ def detect_objects() -> str:
         return json.dumps({"error": "No image was provided by the user."})
 
     with httpx.Client(timeout=30.0) as client:
+        payload = {
+            "image_s3_key": image_s3_key,
+            "chat_id": chat_id,
+            "prediction_id": prediction_id,
+        }
+        logging.info(f"🔍 DEBUG: Sending request to YOLO")
+        logging.info(f"   YOLO_SERVICE_URL: {YOLO_SERVICE_URL}")
+        logging.info(f"   Endpoint: {YOLO_SERVICE_URL}/predict")
+        logging.info(f"   Payload: {json.dumps(payload, indent=2)}")
+        logging.info(f"   Content-Type: application/json")
+        
         response = client.post(
             f"{YOLO_SERVICE_URL}/predict",
-            json={
-                "image_s3_key": image_s3_key,
-                "chat_id": chat_id,
-                "prediction_id": prediction_id,
-            }
+            json=payload
         )
+        
+        logging.info(f"🔍 DEBUG: YOLO Response Received")
+        logging.info(f"   Status Code: {response.status_code}")
+        logging.info(f"   Headers: {dict(response.headers)}")
+        logging.info(f"   Body: {response.text}")
+        
         response.raise_for_status()
 
         prediction_data = response.json()
@@ -185,27 +207,41 @@ def blur_object(object_id: int, radius: float = 2.0) -> str:
     image_b64 = _current_image_b64.get()
     
     try:
-        # Convert image from base64 to bytes
+        # DEBUG: Step 1 - Convert image from base64 to bytes
+        logging.info(f"🔍 blur_object: Step 1 - Converting image b64 to bytes (b64 len: {len(image_b64)})")
         full_image_bytes = b64_to_bytes(image_b64)
+        logging.info(f"   ✓ Image bytes: {len(full_image_bytes)} bytes")
         
-        # Crop the region
+        # DEBUG: Step 2 - Crop the region
+        logging.info(f"🔍 blur_object: Step 2 - Cropping bbox {bbox}")
         cropped_bytes = crop_image_region(full_image_bytes, bbox)
+        logging.info(f"   ✓ Cropped bytes: {len(cropped_bytes)} bytes")
         
-        # Convert cropped region to base64
+        # DEBUG: Step 3 - Convert cropped region to base64
+        logging.info(f"🔍 blur_object: Step 3 - Converting cropped to b64")
         cropped_b64 = bytes_to_b64(cropped_bytes)
+        logging.info(f"   ✓ Cropped b64: {len(cropped_b64)} chars")
         
-        # Call MCP blur
+        # DEBUG: Step 4 - Call MCP blur
+        logging.info(f"🔍 blur_object: Step 4 - Calling MCP blur (radius={radius})")
         client = MCPClient()
         blurred_b64 = client.blur(cropped_b64, radius)
+        logging.info(f"   ✓ Blurred b64: {len(blurred_b64)} chars")
         
-        # Convert blurred result back to bytes
+        # DEBUG: Step 5 - Convert blurred result back to bytes
+        logging.info(f"🔍 blur_object: Step 5 - Converting blurred b64 to bytes")
         blurred_bytes = b64_to_bytes(blurred_b64)
+        logging.info(f"   ✓ Blurred bytes: {len(blurred_bytes)} bytes")
         
-        # Paste back into full image
+        # DEBUG: Step 6 - Paste back into full image
+        logging.info(f"🔍 blur_object: Step 6 - Pasting blurred region back into full image")
         modified_image_bytes = paste_image_region(full_image_bytes, blurred_bytes, bbox)
+        logging.info(f"   ✓ Modified image bytes: {len(modified_image_bytes)} bytes")
         
-        # Convert result back to base64
+        # DEBUG: Step 7 - Convert result back to base64
+        logging.info(f"🔍 blur_object: Step 7 - Converting result to b64")
         modified_image_b64 = bytes_to_b64(modified_image_bytes)
+        logging.info(f"   ✓ Modified b64: {len(modified_image_b64)} chars")
         
         # Update and respond
         return _update_image_and_respond(
@@ -217,6 +253,7 @@ def blur_object(object_id: int, radius: float = 2.0) -> str:
         )
     
     except Exception as e:
+        logging.error(f"❌ blur_object failed: {str(e)}", exc_info=True)
         return json.dumps({"error": f"Failed to blur object: {str(e)}"})
 
 @tool
@@ -306,10 +343,12 @@ class ChatMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    chat_id: Optional[str] = None       # session identifier (None for new conversation)
     messages: list[ChatMessage]         # full conversation thread, oldest first
 
 
 class ChatResponse(BaseModel):
+    chat_id: Optional[str] = None       # session identifier for next request (set by /chat endpoint)
     response: str
     prediction_id: Optional[str] = None
     annotated_image: Optional[str] = None
@@ -408,8 +447,18 @@ app.add_middleware(
 def chat(request: ChatRequest):
     lc_messages = []
     latest_image_s3_key = None
-    chat_id = str(uuid.uuid4())
     prediction_id = str(uuid.uuid4())
+    
+    # Restore or create chat session
+    if request.chat_id and request.chat_id in _chat_image_state:
+        # Follow-up request: restore existing session
+        chat_id = request.chat_id
+        latest_image_s3_key = _chat_image_state[chat_id].get("current_s3_key")
+    else:
+        # New request: generate new chat_id
+        chat_id = str(uuid.uuid4())
+        latest_image_s3_key = None
+        _chat_image_state[chat_id] = {}  # Initialize state for new chat
 
     for msg in request.messages:
         if msg.role == "user":
@@ -424,6 +473,10 @@ def chat(request: ChatRequest):
                         original_filename="original.jpg"
                     )
                     logging.info(f"Image uploaded to S3: {latest_image_s3_key}")
+                    
+                    # Store original and current S3 keys in chat state
+                    _chat_image_state[chat_id]["original_s3_key"] = latest_image_s3_key
+                    _chat_image_state[chat_id]["current_s3_key"] = latest_image_s3_key
                 except Exception as e:
                     logging.error(f"Failed to upload image to S3: {e}")
                     return ChatResponse(
@@ -453,7 +506,9 @@ def chat(request: ChatRequest):
     detections_token = _current_detections.set([])  # Will be populated by detect_objects
 
     try:
-        return run_agent(lc_messages)
+        response = run_agent(lc_messages)
+        response.chat_id = chat_id  # Always return current chat_id
+        return response
     finally:
         _current_image_s3_key.reset(image_token)
         _current_chat_id.reset(chat_token)
