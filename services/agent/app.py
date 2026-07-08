@@ -52,11 +52,14 @@ if MODEL not in ALLOWED_MODELS:
 
 SYSTEM_PROMPT = (
     "You are an AI vision assistant. You help users understand and analyze images. "
-    "CRITICAL: When the user asks to blur, crop, rotate, flip, resize, add noise to, or modify an image in any way, "
+    "CRITICAL: When the user asks to blur, crop, add noise to, or modify an image in any way, "
     "you MUST call the corresponding tool EVERY TIME. Never claim an operation succeeded unless you actually invoked and executed the tool. "
+    "When the user refers to an object by position or natural language (e.g., 'second dog from the right', 'leftmost car'), "
+    "FIRST call resolve_object_reference with ONLY the object reference (e.g., pass 'second dog from the right' not 'blur the second dog from the right'), "
+    "then call the requested tool (blur_object/add_noise_object/crop_object) with the returned object_id. "
     "Each user request is independent - do not copy or repeat previous assistant responses. Always generate fresh tool invocations for each request. "
     "If a tool call fails or cannot be performed, explicitly say you could not complete the operation. "
-    "Available tools: detect_objects, blur_object, crop_object, blur_image, rotate_image, flip_image, resize_image, add_noise_image, add_noise_object."
+    "Available tools: detect_objects, resolve_object_reference, blur_object, crop_object, blur_image, rotate_image, flip_image, resize_image, add_noise_image, add_noise_object."
 )
 
 # Context variables for tracking image metadata during agent execution
@@ -176,6 +179,49 @@ def detect_objects() -> str:
 
     return json.dumps(prediction_data)
 
+@tool
+def resolve_object_reference(reference: str) -> str:
+    """Resolve natural-language object references to a specific object_id.
+    
+    Examples:
+    - "object 0" → first object
+    - "the dog" / "detected car" → object with that label (error if ambiguous)
+    - "first person from left" / "first person from the left" → leftmost person
+    - "second dog from right" / "second dog from the right" → second from rightmost
+    - "leftmost person" / "left person" / "person on the left" → person with smallest bbox.left
+    - "rightmost car" / "right car" / "car on the right" → car with largest bbox.right
+    - "middle cat" → cat at median horizontal position
+    - "second person" → second person from left (default direction)
+    
+    Robust to full action phrases (e.g., 'blur the second person from right' will work).
+    
+    Returns JSON with object_id, label, confidence, bbox on success.
+    Returns JSON error if no match or ambiguous.
+    """
+    # Preprocess: strip action verbs if user accidentally passed full sentence
+    cleaned_reference = _preprocess_reference(reference)
+    result = _parse_object_reference(cleaned_reference)
+    return json.dumps(result)
+
+def _preprocess_reference(reference: str) -> str:
+    """Strip action verbs from reference if user passed full sentence.
+    
+    Examples:
+      - "blur the second person from the right" → "second person from the right"
+      - "add noise to the dog" → "the dog"
+      - "can you crop the leftmost car" → "the leftmost car"
+      - "second person from right" → "second person from right" (no change)
+    """
+    import re
+    ref = reference.strip()
+    
+    # Strip common action phrases at the start (case-insensitive)
+    # Pattern: optional "can you" or "please", then action verb(s)
+    action_pattern = r"^(?:can you\s+|could you\s+|please\s+)?(blur|crop|add noise to|add salt and pepper noise to|add noise|rotate|flip|resize)\s+(?:the\s+)?"
+    ref = re.sub(action_pattern, "", ref, flags=re.IGNORECASE, count=1)
+    
+    return ref.strip()
+
 def _set_current_image(image_b64: str):
     """Update all image state tracking with a modified image.
     
@@ -185,6 +231,278 @@ def _set_current_image(image_b64: str):
     _current_image_b64.set(image_b64)
     _detection_result["annotated_image"] = image_b64
     _detection_result["final_image_b64"] = image_b64
+
+def _parse_object_reference(reference: str) -> dict:
+    """Parse natural-language object reference and resolve to object info.
+    
+    Supports patterns:
+      - "object 0" → first object
+      - "the dog" / "detected dog" → exact label match (error if ambiguous)
+      - "first/second/third dog from left" → position from left
+      - "first/second/third dog from right" → position from right
+      - "leftmost/rightmost dog" → extreme positions
+      - "middle dog" → median position
+    
+    Returns dict with success info or error.
+    """
+    import re
+    
+    detections = _current_detections.get()
+    chat_id = _current_chat_id.get()
+    
+    # Fallback to persistent state if empty (ContextVar isolation across tool calls)
+    if not detections and chat_id and chat_id in _chat_image_state:
+        detections = _chat_image_state[chat_id].get("detections", [])
+    
+    if not detections:
+        return {"success": False, "reference": reference, "error": "No detections available. Please detect objects first."}
+    
+    ref = reference.strip().lower()
+    
+    # Pattern 1: "object N" or "objectN"
+    match = re.match(r"^object\s*(\d+)$", ref)
+    if match:
+        obj_id = int(match.group(1))
+        if 0 <= obj_id < len(detections):
+            det = detections[obj_id]
+            return {
+                "success": True,
+                "reference": reference,
+                "object_id": obj_id,
+                "label": det["label"],
+                "confidence": det["confidence"],
+                "bbox": det["bbox"]
+            }
+        return {
+            "success": False,
+            "reference": reference,
+            "error": f"object_id {obj_id} out of range [0-{len(detections)-1}]"
+        }
+    
+    # Plural handling: map plural forms to singular
+    plural_to_singular = {
+        "people": "person",
+        "persons": "person",
+        "dogs": "dog",
+        "cats": "cat",
+        "cars": "car",
+        "items": "item",
+        "objects": "object",
+    }
+    for plural, singular in plural_to_singular.items():
+        ref = ref.replace(plural, singular)
+    
+    # Pattern 2: "the LABEL" / "detected LABEL"
+    match = re.match(r"^(?:the|detected)\s+(\w+)$", ref)
+    if match:
+        label = match.group(1)
+        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
+        if len(matching) == 1:
+            obj_id = matching[0]
+            det = detections[obj_id]
+            return {
+                "success": True,
+                "reference": reference,
+                "object_id": obj_id,
+                "label": det["label"],
+                "confidence": det["confidence"],
+                "bbox": det["bbox"]
+            }
+        if len(matching) == 0:
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"No '{label}' detected in image."
+            }
+        # Ambiguous: multiple matches
+        return {
+            "success": False,
+            "reference": reference,
+            "error": f"Found {len(matching)} '{label}' objects; be more specific. Try 'first {label} from left', 'second {label} from right', 'leftmost {label}', or 'middle {label}'."
+        }
+    
+    # Pattern 3: "first/second/third LABEL from left/right" or "first/second/third LABEL" (defaults to left)
+    # Try with explicit direction first (with optional "the" after "from")
+    match = re.match(r"^(first|second|third|\d+(?:st|nd|rd|th)?)\s+(\w+)\s+from\s+(?:the\s+)?(left|right)$", ref)
+    if match:
+        pos_word = match.group(1)
+        label = match.group(2)
+        direction = match.group(3)
+    else:
+        # Try without direction (defaults to left-to-right)
+        match = re.match(r"^(first|second|third|\d+(?:st|nd|rd|th)?)\s+(\w+)$", ref)
+        if match:
+            pos_word = match.group(1)
+            label = match.group(2)
+            direction = "left"
+        else:
+            match = None
+    
+    if match:
+        # Map word to index
+        pos_map = {"first": 0, "second": 1, "third": 2}
+        if pos_word in pos_map:
+            position = pos_map[pos_word]
+        else:
+            # Try parsing as number with ordinal suffix (e.g., "1st", "2nd")
+            try:
+                num_str = re.sub(r"(?:st|nd|rd|th)$", "", pos_word)
+                position = int(num_str) - 1
+            except (ValueError, IndexError):
+                return {
+                    "success": False,
+                    "reference": reference,
+                    "error": f"Could not parse position: '{pos_word}'"
+                }
+        
+        # Find all detections matching the label
+        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
+        if not matching:
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"No '{label}' detected in image."
+            }
+        
+        # Sort by bbox center (horizontal position)
+        if direction == "left":
+            matching.sort(key=lambda i: (detections[i]["bbox"][0] + detections[i]["bbox"][2]) / 2)
+        else:  # right
+            matching.sort(key=lambda i: (detections[i]["bbox"][0] + detections[i]["bbox"][2]) / 2, reverse=True)
+        
+        if position >= len(matching):
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"Only {len(matching)} '{label}' object(s) found from {direction}; requested position {position+1}."
+            }
+        
+        obj_id = matching[position]
+        det = detections[obj_id]
+        return {
+            "success": True,
+            "reference": reference,
+            "object_id": obj_id,
+            "label": det["label"],
+            "confidence": det["confidence"],
+            "bbox": det["bbox"]
+        }
+    
+    # Pattern 4: "leftmost/rightmost LABEL" or "left/right LABEL" or "LABEL on the left/right"
+    # Try "leftmost/rightmost LABEL"
+    match = re.match(r"^(leftmost|rightmost)\s+(\w+)$", ref)
+    if match:
+        direction = match.group(1)
+        label = match.group(2)
+        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
+        if not matching:
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"No '{label}' detected in image."
+            }
+        
+        if direction == "leftmost":
+            obj_id = min(matching, key=lambda i: detections[i]["bbox"][0])
+        else:  # rightmost
+            obj_id = max(matching, key=lambda i: detections[i]["bbox"][2])
+        
+        det = detections[obj_id]
+        return {
+            "success": True,
+            "reference": reference,
+            "object_id": obj_id,
+            "label": det["label"],
+            "confidence": det["confidence"],
+            "bbox": det["bbox"]
+        }
+    
+    # Try "left/right LABEL" (maps to leftmost/rightmost)
+    match = re.match(r"^(left|right)\s+(\w+)$", ref)
+    if match:
+        direction = match.group(1)
+        label = match.group(2)
+        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
+        if not matching:
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"No '{label}' detected in image."
+            }
+        
+        if direction == "left":
+            obj_id = min(matching, key=lambda i: detections[i]["bbox"][0])
+        else:  # right
+            obj_id = max(matching, key=lambda i: detections[i]["bbox"][2])
+        
+        det = detections[obj_id]
+        return {
+            "success": True,
+            "reference": reference,
+            "object_id": obj_id,
+            "label": det["label"],
+            "confidence": det["confidence"],
+            "bbox": det["bbox"]
+        }
+    
+    # Try "LABEL on the left/right"
+    match = re.match(r"^(\w+)\s+on\s+the\s+(left|right)$", ref)
+    if match:
+        label = match.group(1)
+        direction = match.group(2)
+        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
+        if not matching:
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"No '{label}' detected in image."
+            }
+        
+        if direction == "left":
+            obj_id = min(matching, key=lambda i: detections[i]["bbox"][0])
+        else:  # right
+            obj_id = max(matching, key=lambda i: detections[i]["bbox"][2])
+        
+        det = detections[obj_id]
+        return {
+            "success": True,
+            "reference": reference,
+            "object_id": obj_id,
+            "label": det["label"],
+            "confidence": det["confidence"],
+            "bbox": det["bbox"]
+        }
+    
+    # Pattern 5: "middle LABEL"
+    match = re.match(r"^middle\s+(\w+)$", ref)
+    if match:
+        label = match.group(1)
+        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
+        if not matching:
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"No '{label}' detected in image."
+            }
+        
+        # Sort by bbox center and take median
+        matching.sort(key=lambda i: (detections[i]["bbox"][0] + detections[i]["bbox"][2]) / 2)
+        obj_id = matching[len(matching) // 2]
+        det = detections[obj_id]
+        return {
+            "success": True,
+            "reference": reference,
+            "object_id": obj_id,
+            "label": det["label"],
+            "confidence": det["confidence"],
+            "bbox": det["bbox"]
+        }
+    
+    return {
+        "success": False,
+        "reference": reference,
+        "error": f"Could not parse reference: '{reference}'. Try 'object 0', 'the dog', 'first person from left', 'leftmost car', 'left person', 'person on the left', or 'middle person'."
+    }
 
 def _validate_and_get_detection(object_id: int):
     """Validate context and get detection object.
@@ -547,6 +865,7 @@ def add_noise_object(object_id: int, amount: float = 0.1) -> str:
 # Registry: map tool name -> tool function
 TOOLS = {
     detect_objects.name: detect_objects,
+    resolve_object_reference.name: resolve_object_reference,
     blur_object.name: blur_object,
     crop_object.name: crop_object,
     blur_image.name: blur_image,
