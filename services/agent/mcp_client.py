@@ -212,6 +212,25 @@ class MCPClient:
         """
         return self._run_async(self._add_noise_async(image_b64, amount))
     
+    def paste_region(self, full_image_b64: str, region_b64: str, left: int, top: int, right: int, bottom: int) -> str:
+        """Paste a processed region back into a full image.
+        
+        Args:
+            full_image_b64: Base64-encoded full image
+            region_b64: Base64-encoded region (must match bbox dimensions)
+            left: Left edge x coordinate
+            top: Top edge y coordinate
+            right: Right edge x coordinate
+            bottom: Bottom edge y coordinate
+            
+        Returns:
+            Base64-encoded composite image
+            
+        Raises:
+            ValueError: If MCP server returns unexpected response
+        """
+        return self._run_async(self._paste_region_async(full_image_b64, region_b64, left, top, right, bottom))
+    
     # ========================================================================
     # PRIVATE ASYNC METHODS - Internal implementations using langchain-mcp-adapters
     # ========================================================================
@@ -284,4 +303,21 @@ class MCPClient:
         if not noise_tool:
             raise ValueError("add_noise tool not found in MCP server")
         result = await noise_tool.ainvoke({"image_b64": image_b64, "amount": amount})
+        return self._extract_b64(result)
+    
+    async def _paste_region_async(self, full_image_b64: str, region_b64: str, left: int, top: int, right: int, bottom: int) -> str:
+        """Internal async paste_region implementation."""
+        client = await self._get_client_async()
+        tools = await client.get_tools(server_name="img-proc")
+        paste_tool = next((t for t in tools if t.name == "paste_region"), None)
+        if not paste_tool:
+            raise ValueError("paste_region tool not found in MCP server")
+        result = await paste_tool.ainvoke({
+            "full_image_b64": full_image_b64,
+            "region_b64": region_b64,
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom
+        })
         return self._extract_b64(result)

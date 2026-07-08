@@ -91,5 +91,53 @@ def add_noise(image_b64: str, amount: float = 0.1) -> str:
     return _encode(img)
 
 
+@mcp.tool()
+def paste_region(full_image_b64: str, region_b64: str, left: int, top: int, right: int, bottom: int) -> str:
+    """Paste a processed region back into a full image at specified coordinates.
+    
+    Used to composite object-specific transformations (e.g., a blurred region) back into the full image.
+    
+    Args:
+        full_image_b64: Full original image as base64-encoded PNG
+        region_b64: Processed region to paste as base64-encoded PNG
+        left, top, right, bottom: Bounding box coordinates where region should be pasted
+        
+    Returns:
+        Full image with region pasted, as base64-encoded PNG
+        
+    Raises:
+        ValueError: If bbox coordinates are invalid or region size doesn't match bbox dimensions
+    """
+    if left < 0 or top < 0 or right <= left or bottom <= top:
+        raise ValueError(
+            f"Invalid bbox coordinates: left={left}, top={top}, right={right}, bottom={bottom}. "
+            "Require: 0 <= left < right and 0 <= top < bottom"
+        )
+    
+    full_img = _decode(full_image_b64)
+    region_img = _decode(region_b64)
+    
+    # Validate region size matches bbox dimensions
+    bbox_width = right - left
+    bbox_height = bottom - top
+    region_width, region_height = region_img.size
+    
+    if region_width != bbox_width or region_height != bbox_height:
+        raise ValueError(
+            f"Region size ({region_width}x{region_height}) does not match "
+            f"bbox dimensions ({bbox_width}x{bbox_height}) at coordinates ({left}, {top}, {right}, {bottom})"
+        )
+    
+    # Ensure region has alpha channel if full image does (for proper compositing)
+    if full_img.mode in ("RGBA", "LA"):
+        if region_img.mode != "RGBA":
+            region_img = region_img.convert("RGBA")
+    
+    # Paste region into full image
+    full_img.paste(region_img, (left, top))
+    
+    return _encode(full_img)
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

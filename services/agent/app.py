@@ -29,7 +29,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from s3_utils import upload_image_to_s3, download_image_from_s3
-from image_utils import b64_to_bytes, crop_image_region, paste_image_region, bytes_to_b64
+from image_utils import bytes_to_b64
 from mcp_client import MCPClient
 
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
@@ -244,55 +244,37 @@ def _update_image_and_respond(modified_image_b64: str, label: str, object_id: in
 @tool
 def blur_object(object_id: int, radius: float = 2.0) -> str:
     """Blur a detected object in the image. Specify the object ID and blur radius (default 2.0)."""
-    # Validate and get detection
+    # Step 1: Validate and get detection
     result = _validate_and_get_detection(object_id)
     if isinstance(result, str):
         return result  # Error response
     detection, label = result
     bbox = detection["bbox"]
     # Convert bbox coordinates to integers (YOLO returns floats)
-    bbox = tuple(int(round(coord)) for coord in bbox)
+    left, top, right, bottom = tuple(int(round(coord)) for coord in bbox)
     
+    # Step 2: Get current image
     image_b64 = _current_image_b64.get()
     
     try:
-        # DEBUG: Step 1 - Convert image from base64 to bytes
-        logging.info(f"🔍 blur_object: Step 1 - Converting image b64 to bytes (b64 len: {len(image_b64)})")
-        full_image_bytes = b64_to_bytes(image_b64)
-        logging.info(f"   ✓ Image bytes: {len(full_image_bytes)} bytes")
-        
-        # DEBUG: Step 2 - Crop the region
-        logging.info(f"🔍 blur_object: Step 2 - Cropping bbox {bbox}")
-        cropped_bytes = crop_image_region(full_image_bytes, bbox)
-        logging.info(f"   ✓ Cropped bytes: {len(cropped_bytes)} bytes")
-        
-        # DEBUG: Step 3 - Convert cropped region to base64
-        logging.info(f"🔍 blur_object: Step 3 - Converting cropped to b64")
-        cropped_b64 = bytes_to_b64(cropped_bytes)
-        logging.info(f"   ✓ Cropped b64: {len(cropped_b64)} chars")
-        
-        # DEBUG: Step 4 - Call MCP blur
-        logging.info(f"🔍 blur_object: Step 4 - Calling MCP blur (radius={radius})")
         client = MCPClient()
+        
+        # Step 3: MCP crop
+        logging.info(f"🔍 blur_object: Cropping object {object_id} bbox ({left}, {top}, {right}, {bottom})")
+        cropped_b64 = client.crop(image_b64, left, top, right, bottom)
+        logging.info(f"   ✓ Cropped: {len(cropped_b64)} chars")
+        
+        # Step 4: MCP blur
+        logging.info(f"🔍 blur_object: Blurring cropped region (radius={radius})")
         blurred_b64 = client.blur(cropped_b64, radius)
-        logging.info(f"   ✓ Blurred b64: {len(blurred_b64)} chars")
+        logging.info(f"   ✓ Blurred: {len(blurred_b64)} chars")
         
-        # DEBUG: Step 5 - Convert blurred result back to bytes
-        logging.info(f"🔍 blur_object: Step 5 - Converting blurred b64 to bytes")
-        blurred_bytes = b64_to_bytes(blurred_b64)
-        logging.info(f"   ✓ Blurred bytes: {len(blurred_bytes)} bytes")
+        # Step 5: MCP paste_region
+        logging.info(f"🔍 blur_object: Pasting blurred region back into full image")
+        modified_image_b64 = client.paste_region(image_b64, blurred_b64, left, top, right, bottom)
+        logging.info(f"   ✓ Composited: {len(modified_image_b64)} chars")
         
-        # DEBUG: Step 6 - Paste back into full image
-        logging.info(f"🔍 blur_object: Step 6 - Pasting blurred region back into full image")
-        modified_image_bytes = paste_image_region(full_image_bytes, blurred_bytes, bbox)
-        logging.info(f"   ✓ Modified image bytes: {len(modified_image_bytes)} bytes")
-        
-        # DEBUG: Step 7 - Convert result back to base64
-        logging.info(f"🔍 blur_object: Step 7 - Converting result to b64")
-        modified_image_b64 = bytes_to_b64(modified_image_bytes)
-        logging.info(f"   ✓ Modified b64: {len(modified_image_b64)} chars")
-        
-        # Update and respond
+        # Step 6: Update and respond
         return _update_image_and_respond(
             modified_image_b64,
             label,
@@ -519,37 +501,37 @@ def add_noise_object(object_id: int, amount: float = 0.1) -> str:
     if not isinstance(amount, (int, float)) or amount < 0.0 or amount > 1.0:
         return json.dumps({"error": "Amount must be a number between 0.0 and 1.0."})
     
-    # Validate and get detection
+    # Step 1: Validate and get detection
     result = _validate_and_get_detection(object_id)
     if isinstance(result, str):
         return result  # Error response
     detection, label = result
     bbox = detection["bbox"]
     # Convert bbox coordinates to integers (YOLO returns floats)
-    bbox = tuple(int(round(coord)) for coord in bbox)
+    left, top, right, bottom = tuple(int(round(coord)) for coord in bbox)
     
+    # Step 2: Get current image
     image_b64 = _current_image_b64.get()
     
     try:
-        logging.info(f"🔵 add_noise_object: Processing {label} (object #{object_id}) with amount={amount}")
-        
-        # Crop, process, and paste workflow
-        full_image_bytes = b64_to_bytes(image_b64)
-        cropped_bytes = crop_image_region(full_image_bytes, bbox)
-        cropped_b64 = bytes_to_b64(cropped_bytes)
-        
-        # Call MCP add_noise on cropped region only
         client = MCPClient()
+        
+        # Step 3: MCP crop
+        logging.info(f"🔍 add_noise_object: Cropping object {object_id} bbox ({left}, {top}, {right}, {bottom})")
+        cropped_b64 = client.crop(image_b64, left, top, right, bottom)
+        logging.info(f"   ✓ Cropped: {len(cropped_b64)} chars")
+        
+        # Step 4: MCP add_noise
+        logging.info(f"🔍 add_noise_object: Adding noise to cropped region (amount={amount})")
         noisy_b64 = client.add_noise(cropped_b64, amount)
+        logging.info(f"   ✓ Noisy: {len(noisy_b64)} chars")
         
-        # Paste noisy region back into full image
-        noisy_bytes = b64_to_bytes(noisy_b64)
-        modified_image_bytes = paste_image_region(full_image_bytes, noisy_bytes, bbox)
-        modified_image_b64 = bytes_to_b64(modified_image_bytes)
+        # Step 5: MCP paste_region
+        logging.info(f"🔍 add_noise_object: Pasting noisy region back into full image")
+        modified_image_b64 = client.paste_region(image_b64, noisy_b64, left, top, right, bottom)
+        logging.info(f"   ✓ Composited: {len(modified_image_b64)} chars")
         
-        logging.info(f"   ✅ MCP add_noise completed and pasted back")
-        
-        # Update and respond
+        # Step 6: Update and respond
         return _update_image_and_respond(
             modified_image_b64,
             label,
