@@ -52,9 +52,11 @@ if MODEL not in ALLOWED_MODELS:
 
 SYSTEM_PROMPT = (
     "You are an AI vision assistant. You help users understand and analyze images. "
-    "You can detect objects using detect_objects, blur specific objects using blur_object, "
-    "and crop specific objects using crop_object. "
-    "Use the available tools to extract information from images and perform image processing tasks. "
+    "CRITICAL: When the user asks to blur, crop, rotate, flip, resize, add noise to, or modify an image in any way, "
+    "you MUST call the corresponding tool EVERY TIME. Never claim an operation succeeded unless you actually invoked and executed the tool. "
+    "Each user request is independent - do not copy or repeat previous assistant responses. Always generate fresh tool invocations for each request. "
+    "If a tool call fails or cannot be performed, explicitly say you could not complete the operation. "
+    "Available tools: detect_objects, blur_object, crop_object, blur_image, rotate_image, flip_image, resize_image, add_noise_image, add_noise_object."
 )
 
 # Context variables for tracking image metadata during agent execution
@@ -129,8 +131,8 @@ def detect_objects() -> str:
             annotated_image_b64 = base64.b64encode(image_response.content).decode("utf-8")
             _detection_result["annotated_image"] = annotated_image_b64
             
-            # Store annotated image in context for blur_object/crop_object to use
-            _current_image_b64.set(annotated_image_b64)
+            # Keep working image as clean version (without boxes) - annotated is display-only
+            # Tools like blur_object should work on the original, not the version with boxes
         
         # Fetch full detection objects from YOLO using the prediction_id
         detections = []
@@ -658,7 +660,44 @@ def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
     tokens_used = TokensUsed()
 
     for iteration in range(1, max_iterations + 1):
+        # ===== DEBUG: Log messages before invoke =====
+        print(f"\n{'='*80}")
+        print(f"ITERATION {iteration}: About to invoke LLM")
+        print(f"{'='*80}")
+        print(f"Total messages: {len(messages)}")
+        
+        has_successfully_blurred = False
+        for i, msg in enumerate(messages):
+            msg_type = type(msg).__name__
+            content = msg.content if hasattr(msg, "content") else str(msg)
+            if isinstance(content, list):
+                content_str = str(content)[:300]
+            else:
+                content_str = str(content)[:300]
+            
+            print(f"  [{i}] {msg_type}: {content_str}...")
+            
+            if msg_type == "AIMessage" and "successfully blurred" in str(msg.content).lower():
+                has_successfully_blurred = True
+        
+        print(f"\nPrevious messages contain 'successfully blurred': {has_successfully_blurred}")
+        print(f"{'='*80}\n")
+        
         response: AIMessage = llm_with_tools.invoke(messages)
+        
+        # ===== DEBUG: Log response after invoke =====
+        print(f"\n{'='*80}")
+        print(f"ITERATION {iteration}: LLM Response")
+        print(f"{'='*80}")
+        response_content = response.content if hasattr(response, "content") else str(response)
+        if isinstance(response_content, list):
+            response_content_str = str(response_content)[:300]
+        else:
+            response_content_str = str(response_content)[:300]
+        print(f"Response content (first 300 chars): {response_content_str}...")
+        print(f"Response tool_calls: {response.tool_calls}")
+        print(f"{'='*80}\n")
+        
         usage = getattr(response, "usage_metadata", None) or {}
 
         tokens_used.input += usage.get("input_tokens", 0)
@@ -809,9 +848,84 @@ def chat(request: ChatRequest):
     detections_token = _current_detections.set(restored_detections)  # Restore previous detections
     logging.info(f"📸 Set context vars: image_s3_key={latest_image_s3_key}, detections={len(restored_detections)}")
 
+    # Phase 6: Sanitize message history to break pattern-matching
+    # Replace prior assistant messages that confirm image-operation success with neutral summaries
+    sanitized_lc_messages = []
+    for msg in lc_messages:
+        if isinstance(msg, AIMessage):
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            
+            # Check if this is a success confirmation message (not the current response)
+            is_success_confirmation = any([
+                "successfully blurred" in content.lower(),
+                "blur operation" in content.lower() and "successful" in content.lower(),
+                "successfully cropped" in content.lower(),
+                "successfully rotated" in content.lower(),
+                "successfully flipped" in content.lower(),
+                "successfully resized" in content.lower(),
+                "successfully added noise" in content.lower(),
+                "operation was successful" in content.lower() and any(op in content.lower() for op in ["blur", "crop", "rotate", "flip", "resize", "noise"]),
+            ])
+            
+            if is_success_confirmation:
+                # Replace with neutral summary to avoid pattern-matching
+                logging.info(f"🧹 Sanitizing prior success message (first 80 chars): {content[:80]}")
+                sanitized_lc_messages.append(AIMessage(
+                    content="[Previous assistant response summarized: an image operation result was shown to the user.]"
+                ))
+            else:
+                sanitized_lc_messages.append(msg)
+        else:
+            sanitized_lc_messages.append(msg)
+
     try:
-        response = run_agent(lc_messages)
+        response = run_agent(sanitized_lc_messages)
         response.chat_id = chat_id  # Always return current chat_id
+        
+        # Hallucination guard with two-tier strategy
+        latest_user_msg = ""
+        for msg in reversed(request.messages):
+            if msg.role == "user":
+                latest_user_msg = msg.content.lower()
+                break
+        
+        # Check for modification keywords (strong guard - always require tools)
+        modification_keywords = {"blur", "crop", "rotate", "flip", "resize", "noise", "modify", "edit", "transform"}
+        user_asked_for_modification = any(keyword in latest_user_msg for keyword in modification_keywords)
+        
+        # Check for detect keywords (smart guard - only guard if no prior detections)
+        user_asked_for_detect = "detect objects" in latest_user_msg or "detect all" in latest_user_msg
+        prior_detections = _current_detections.get() or _chat_image_state.get(chat_id, {}).get("detections", [])
+        
+        # STRONG GUARD: Modification commands must always invoke tools
+        if response.tools_called == [] and user_asked_for_modification:
+            logging.warning(f"❌ HALLUCINATION GUARD (modification): User requested image modification but no tools invoked. User msg: '{latest_user_msg}'. LLM response: '{response.response}'")
+            return ChatResponse(
+                chat_id=chat_id,
+                response=f"I could not perform the requested image operation. Please try again or rephrase your request.",
+                prediction_id=_detection_result["prediction_id"],
+                annotated_image=_detection_result["annotated_image"],
+                agent_loop_time_s=response.agent_loop_time_s,
+                iterations=response.iterations,
+                tools_called=[],
+                context_limit_exceeded=False,
+                tokens_used=response.tokens_used,
+            )
+        
+        # SMART GUARD: Detect only errors if no prior detections and tools not called
+        if response.tools_called == [] and user_asked_for_detect and not prior_detections:
+            logging.warning(f"❌ HALLUCINATION GUARD (detect): User requested object detection but no tools invoked and no prior detections. User msg: '{latest_user_msg}'. LLM response: '{response.response}'")
+            return ChatResponse(
+                chat_id=chat_id,
+                response=f"I could not detect objects. Please try again or rephrase your request.",
+                prediction_id=_detection_result["prediction_id"],
+                annotated_image=_detection_result["annotated_image"],
+                agent_loop_time_s=response.agent_loop_time_s,
+                iterations=response.iterations,
+                tools_called=[],
+                context_limit_exceeded=False,
+                tokens_used=response.tokens_used,
+            )
         
         # Persist detections back to chat state after agent completes
         final_detections = _current_detections.get()
