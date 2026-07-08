@@ -132,23 +132,42 @@ def detect_objects() -> str:
             # Store annotated image in context for blur_object/crop_object to use
             _current_image_b64.set(annotated_image_b64)
         
-        # Parse detections from YOLO response and store in context
+        # Fetch full detection objects from YOLO using the prediction_id
         detections = []
-        if "detections" in prediction_data:
-            for idx, detection in enumerate(prediction_data["detections"]):
-                detections.append({
-                    "id": idx,
-                    "label": detection.get("label", "unknown"),
-                    "bbox": (
-                        detection.get("x1", 0),
-                        detection.get("y1", 0),
-                        detection.get("x2", 0),
-                        detection.get("y2", 0),
-                    ),
-                    "confidence": detection.get("confidence", 0.0),
-                })
+        if prediction_id_from_response:
+            detections_response = client.get(
+                f"{YOLO_SERVICE_URL}/prediction/{prediction_id_from_response}"
+            )
+            detections_response.raise_for_status()
+            detection_data = detections_response.json()
+            
+            # Parse detection_objects from YOLO response
+            if "detection_objects" in detection_data:
+                for idx, obj in enumerate(detection_data["detection_objects"]):
+                    # Parse box format: JSON array string "[x1, y1, x2, y2]"
+                    try:
+                        box_str = obj.get("box", "[]")
+                        # Handle both JSON array string and direct string formats
+                        if isinstance(box_str, str):
+                            box_coords = json.loads(box_str)
+                        else:
+                            box_coords = box_str
+                        x1, y1, x2, y2 = box_coords[0], box_coords[1], box_coords[2], box_coords[3]
+                    except (ValueError, IndexError, json.JSONDecodeError, TypeError):
+                        x1, y1, x2, y2 = 0, 0, 0, 0
+                    
+                    detections.append({
+                        "id": idx,
+                        "label": obj.get("label", "unknown"),
+                        "bbox": (x1, y1, x2, y2),
+                        "confidence": obj.get("score", 0.0),
+                    })
         
         _current_detections.set(detections)
+        # Also save to persistent state so other tools in the same request can access detections
+        # (ContextVar isolation prevents same-request tool calls from seeing ContextVar values)
+        if chat_id and chat_id in _chat_image_state:
+            _chat_image_state[chat_id]["detections"] = detections
         logging.info(f"✅ Parsed {len(detections)} detections and stored in _current_detections context")
         for i, det in enumerate(detections):
             logging.info(f"   [{i}] {det['label']} (confidence: {det['confidence']:.2f})")
@@ -174,11 +193,20 @@ def _validate_and_get_detection(object_id: int):
     """
     image_b64 = _current_image_b64.get()
     detections = _current_detections.get()
+    chat_id = _current_chat_id.get()
+    
+    logging.info(f"🔍 _validate_and_get_detection({object_id}): detections_contextvar={len(detections) if detections else 0}, chat_id={chat_id}")
+    
+    # Fallback to persistent state if ContextVar is empty (ContextVar isolation across tool calls)
+    if not detections and chat_id and chat_id in _chat_image_state:
+        detections = _chat_image_state[chat_id].get("detections", [])
+        logging.info(f"   ↳ Restored {len(detections)} detections from persistent state")
     
     if not image_b64:
         return json.dumps({"error": "No image available. Please detect objects first."})
     
     if not detections:
+        logging.info(f"   ↳ No detections available (none in contextvar, fallback empty/missing)")
         return json.dumps({"error": "No detections available. Please detect objects first."})
     
     if object_id < 0 or object_id >= len(detections):
@@ -220,6 +248,8 @@ def blur_object(object_id: int, radius: float = 2.0) -> str:
         return result  # Error response
     detection, label = result
     bbox = detection["bbox"]
+    # Convert bbox coordinates to integers (YOLO returns floats)
+    bbox = tuple(int(round(coord)) for coord in bbox)
     
     image_b64 = _current_image_b64.get()
     
@@ -282,15 +312,17 @@ def crop_object(object_id: int, left_offset: int = 0, top_offset: int = 0, right
         return result  # Error response
     detection, label = result
     bbox = detection["bbox"]
+    # Convert bbox coordinates to integers (YOLO returns floats)
+    bbox = tuple(int(round(coord)) for coord in bbox)
     
     image_b64 = _current_image_b64.get()
     
     # Apply offsets to bbox: (x1, y1, x2, y2)
     x1, y1, x2, y2 = bbox
-    left = x1 - left_offset
-    top = y1 - top_offset
-    right = x2 + right_offset
-    bottom = y2 + bottom_offset
+    left = int(x1 - left_offset)
+    top = int(y1 - top_offset)
+    right = int(x2 + right_offset)
+    bottom = int(y2 + bottom_offset)
     
     try:
         # Get current image and crop region
