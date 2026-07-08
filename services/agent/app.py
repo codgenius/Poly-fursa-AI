@@ -510,6 +510,56 @@ def add_noise_image(amount: float = 0.1) -> str:
         logging.error(f"❌ add_noise_image failed: {str(e)}", exc_info=True)
         return json.dumps({"error": f"Failed to add noise to image: {str(e)}"})
 
+@tool
+def add_noise_object(object_id: int, amount: float = 0.1) -> str:
+    """Add noise to a detected object in the image. Specify the object ID and noise amount (0.0-1.0)."""
+    # Validate amount
+    if not isinstance(amount, (int, float)) or amount < 0.0 or amount > 1.0:
+        return json.dumps({"error": "Amount must be a number between 0.0 and 1.0."})
+    
+    # Validate and get detection
+    result = _validate_and_get_detection(object_id)
+    if isinstance(result, str):
+        return result  # Error response
+    detection, label = result
+    bbox = detection["bbox"]
+    # Convert bbox coordinates to integers (YOLO returns floats)
+    bbox = tuple(int(round(coord)) for coord in bbox)
+    
+    image_b64 = _current_image_b64.get()
+    
+    try:
+        logging.info(f"🔵 add_noise_object: Processing {label} (object #{object_id}) with amount={amount}")
+        
+        # Crop, process, and paste workflow
+        full_image_bytes = b64_to_bytes(image_b64)
+        cropped_bytes = crop_image_region(full_image_bytes, bbox)
+        cropped_b64 = bytes_to_b64(cropped_bytes)
+        
+        # Call MCP add_noise on cropped region only
+        client = MCPClient()
+        noisy_b64 = client.add_noise(cropped_b64, amount)
+        
+        # Paste noisy region back into full image
+        noisy_bytes = b64_to_bytes(noisy_b64)
+        modified_image_bytes = paste_image_region(full_image_bytes, noisy_bytes, bbox)
+        modified_image_b64 = bytes_to_b64(modified_image_bytes)
+        
+        logging.info(f"   ✅ MCP add_noise completed and pasted back")
+        
+        # Update and respond
+        return _update_image_and_respond(
+            modified_image_b64,
+            label,
+            object_id,
+            "added noise to",
+            f"with amount {amount}"
+        )
+    
+    except Exception as e:
+        logging.error(f"❌ add_noise_object failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to add noise to object: {str(e)}"})
+
 # Registry: map tool name -> tool function
 TOOLS = {
     detect_objects.name: detect_objects,
@@ -520,6 +570,7 @@ TOOLS = {
     flip_image.name: flip_image,
     resize_image.name: resize_image,
     add_noise_image.name: add_noise_image,
+    add_noise_object.name: add_noise_object,
 }
 
 # Parse MODEL string (format: "provider:model_id")
