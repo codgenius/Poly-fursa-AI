@@ -28,7 +28,9 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from s3_utils import upload_image_to_s3
+from s3_utils import upload_image_to_s3, download_image_from_s3
+from image_utils import bytes_to_b64
+from mcp_client import MCPClient
 
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
 MODEL = os.environ.get("MODEL")
@@ -50,37 +52,72 @@ if MODEL not in ALLOWED_MODELS:
 
 SYSTEM_PROMPT = (
     "You are an AI vision assistant. You help users understand and analyze images. "
-    "Use the available tools to extract information from images. "
+    "CRITICAL: When the user asks to blur, crop, add noise to, or modify an image in any way, "
+    "you MUST call the corresponding tool EVERY TIME. Never claim an operation succeeded unless you actually invoked and executed the tool. "
+    "When the user refers to an object by position or natural language (e.g., 'second dog from the right', 'leftmost car'), "
+    "FIRST call resolve_object_reference with ONLY the object reference (e.g., pass 'second dog from the right' not 'blur the second dog from the right'), "
+    "then call the requested tool (blur_object/add_noise_object/crop_object) with the returned object_id. "
+    "Each user request is independent - do not copy or repeat previous assistant responses. Always generate fresh tool invocations for each request. "
+    "If a tool call fails or cannot be performed, explicitly say you could not complete the operation. "
+    "Available tools: detect_objects, resolve_object_reference, blur_object, crop_object, blur_image, rotate_image, flip_image, resize_image, add_noise_image, add_noise_object."
 )
 
 # Context variables for tracking image metadata during agent execution
 _current_image_s3_key: ContextVar[Optional[str]] = ContextVar("current_image_s3_key", default=None)
 _current_chat_id: ContextVar[Optional[str]] = ContextVar("current_chat_id", default=None)
 _current_prediction_id: ContextVar[Optional[str]] = ContextVar("current_prediction_id", default=None)
+_current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
+_current_detections: ContextVar[list] = ContextVar("current_detections", default=[])
 _detection_result = {
     "prediction_id": None,
     "annotated_image": None,
 }
+
+# Persistent chat state indexed by chat_id
+_chat_image_state: dict[str, dict] = {}
+# Structure: {
+#   "chat_id": {
+#       "original_s3_key": str,
+#       "current_s3_key": str,
+#       "detections": list,  # Cached YOLO detections from latest detect_objects call
+#   }
+# }
 
 @tool
 def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
     image_s3_key = _current_image_s3_key.get()
     chat_id = _current_chat_id.get()
-    prediction_id = _current_prediction_id.get()
+    
+    # Generate fresh prediction_id for this detection call (not reusing per-request one)
+    # This ensures YOLO doesn't see duplicate UIDs if detect_objects is called multiple times
+    detection_prediction_id = str(uuid.uuid4())
     
     if not image_s3_key:
         return json.dumps({"error": "No image was provided by the user."})
 
     with httpx.Client(timeout=30.0) as client:
+        payload = {
+            "image_s3_key": image_s3_key,
+            "chat_id": chat_id,
+            "prediction_id": detection_prediction_id,
+        }
+        logging.info(f"🔍 DEBUG: Sending request to YOLO")
+        logging.info(f"   YOLO_SERVICE_URL: {YOLO_SERVICE_URL}")
+        logging.info(f"   Endpoint: {YOLO_SERVICE_URL}/predict")
+        logging.info(f"   Payload: {json.dumps(payload, indent=2)}")
+        logging.info(f"   Content-Type: application/json")
+        
         response = client.post(
             f"{YOLO_SERVICE_URL}/predict",
-            json={
-                "image_s3_key": image_s3_key,
-                "chat_id": chat_id,
-                "prediction_id": prediction_id,
-            }
+            json=payload
         )
+        
+        logging.info(f"🔍 DEBUG: YOLO Response Received")
+        logging.info(f"   Status Code: {response.status_code}")
+        logging.info(f"   Headers: {dict(response.headers)}")
+        logging.info(f"   Body: {response.text}")
+        
         response.raise_for_status()
 
         prediction_data = response.json()
@@ -96,12 +133,747 @@ def detect_objects() -> str:
 
             annotated_image_b64 = base64.b64encode(image_response.content).decode("utf-8")
             _detection_result["annotated_image"] = annotated_image_b64
+            
+            # Keep working image as clean version (without boxes) - annotated is display-only
+            # Tools like blur_object should work on the original, not the version with boxes
+        
+        # Fetch full detection objects from YOLO using the prediction_id
+        detections = []
+        if prediction_id_from_response:
+            detections_response = client.get(
+                f"{YOLO_SERVICE_URL}/prediction/{prediction_id_from_response}"
+            )
+            detections_response.raise_for_status()
+            detection_data = detections_response.json()
+            
+            # Parse detection_objects from YOLO response
+            if "detection_objects" in detection_data:
+                for idx, obj in enumerate(detection_data["detection_objects"]):
+                    # Parse box format: JSON array string "[x1, y1, x2, y2]"
+                    try:
+                        box_str = obj.get("box", "[]")
+                        # Handle both JSON array string and direct string formats
+                        if isinstance(box_str, str):
+                            box_coords = json.loads(box_str)
+                        else:
+                            box_coords = box_str
+                        x1, y1, x2, y2 = box_coords[0], box_coords[1], box_coords[2], box_coords[3]
+                    except (ValueError, IndexError, json.JSONDecodeError, TypeError):
+                        x1, y1, x2, y2 = 0, 0, 0, 0
+                    
+                    detections.append({
+                        "id": idx,
+                        "label": obj.get("label", "unknown"),
+                        "bbox": (x1, y1, x2, y2),
+                        "confidence": obj.get("score", 0.0),
+                    })
+        
+        _current_detections.set(detections)
+        # Also save to persistent state so other tools in the same request can access detections
+        # (ContextVar isolation prevents same-request tool calls from seeing ContextVar values)
+        if chat_id and chat_id in _chat_image_state:
+            _chat_image_state[chat_id]["detections"] = detections
+        logging.info(f"✅ Parsed {len(detections)} detections and stored in _current_detections context")
+        for i, det in enumerate(detections):
+            logging.info(f"   [{i}] {det['label']} (confidence: {det['confidence']:.2f})")
 
     return json.dumps(prediction_data)
 
+@tool
+def resolve_object_reference(reference: str) -> str:
+    """Resolve natural-language object references to a specific object_id.
+    
+    Examples:
+    - "object 0" → first object
+    - "the dog" / "detected car" → object with that label (error if ambiguous)
+    - "first person from left" / "first person from the left" → leftmost person
+    - "second dog from right" / "second dog from the right" → second from rightmost
+    - "leftmost person" / "left person" / "person on the left" → person with smallest bbox.left
+    - "rightmost car" / "right car" / "car on the right" → car with largest bbox.right
+    - "middle cat" → cat at median horizontal position
+    - "second person" → second person from left (default direction)
+    
+    Robust to full action phrases (e.g., 'blur the second person from right' will work).
+    
+    Returns JSON with object_id, label, confidence, bbox on success.
+    Returns JSON error if no match or ambiguous.
+    """
+    # Preprocess: strip action verbs if user accidentally passed full sentence
+    cleaned_reference = _preprocess_reference(reference)
+    result = _parse_object_reference(cleaned_reference)
+    return json.dumps(result)
+
+def _preprocess_reference(reference: str) -> str:
+    """Strip action verbs from reference if user passed full sentence.
+    
+    Examples:
+      - "blur the second person from the right" → "second person from the right"
+      - "add noise to the dog" → "the dog"
+      - "can you crop the leftmost car" → "the leftmost car"
+      - "second person from right" → "second person from right" (no change)
+    """
+    import re
+    ref = reference.strip()
+    
+    # Strip common action phrases at the start (case-insensitive)
+    # Pattern: optional "can you" or "please", then action verb(s)
+    action_pattern = r"^(?:can you\s+|could you\s+|please\s+)?(blur|crop|add noise to|add salt and pepper noise to|add noise|rotate|flip|resize)\s+(?:the\s+)?"
+    ref = re.sub(action_pattern, "", ref, flags=re.IGNORECASE, count=1)
+    
+    return ref.strip()
+
+def _set_current_image(image_b64: str):
+    """Update all image state tracking with a modified image.
+    
+    Ensures consistency across ContextVars and _detection_result dict,
+    which is necessary to persist changes across tool context boundaries (Phase 5).
+    """
+    _current_image_b64.set(image_b64)
+    _detection_result["annotated_image"] = image_b64
+    _detection_result["final_image_b64"] = image_b64
+
+def _parse_object_reference(reference: str) -> dict:
+    """Parse natural-language object reference and resolve to object info.
+    
+    Supports patterns:
+      - "object 0" → first object
+      - "the dog" / "detected dog" → exact label match (error if ambiguous)
+      - "first/second/third dog from left" → position from left
+      - "first/second/third dog from right" → position from right
+      - "leftmost/rightmost dog" → extreme positions
+      - "middle dog" → median position
+    
+    Returns dict with success info or error.
+    """
+    import re
+    
+    detections = _current_detections.get()
+    chat_id = _current_chat_id.get()
+    
+    # Fallback to persistent state if empty (ContextVar isolation across tool calls)
+    if not detections and chat_id and chat_id in _chat_image_state:
+        detections = _chat_image_state[chat_id].get("detections", [])
+    
+    if not detections:
+        return {"success": False, "reference": reference, "error": "No detections available. Please detect objects first."}
+    
+    ref = reference.strip().lower()
+    
+    # Pattern 1: "object N" or "objectN"
+    match = re.match(r"^object\s*(\d+)$", ref)
+    if match:
+        obj_id = int(match.group(1))
+        if 0 <= obj_id < len(detections):
+            det = detections[obj_id]
+            return {
+                "success": True,
+                "reference": reference,
+                "object_id": obj_id,
+                "label": det["label"],
+                "confidence": det["confidence"],
+                "bbox": det["bbox"]
+            }
+        return {
+            "success": False,
+            "reference": reference,
+            "error": f"object_id {obj_id} out of range [0-{len(detections)-1}]"
+        }
+    
+    # Plural handling: map plural forms to singular
+    plural_to_singular = {
+        "people": "person",
+        "persons": "person",
+        "dogs": "dog",
+        "cats": "cat",
+        "cars": "car",
+        "items": "item",
+        "objects": "object",
+    }
+    for plural, singular in plural_to_singular.items():
+        ref = ref.replace(plural, singular)
+    
+    # Pattern 2: "the LABEL" / "detected LABEL"
+    match = re.match(r"^(?:the|detected)\s+(\w+)$", ref)
+    if match:
+        label = match.group(1)
+        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
+        if len(matching) == 1:
+            obj_id = matching[0]
+            det = detections[obj_id]
+            return {
+                "success": True,
+                "reference": reference,
+                "object_id": obj_id,
+                "label": det["label"],
+                "confidence": det["confidence"],
+                "bbox": det["bbox"]
+            }
+        if len(matching) == 0:
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"No '{label}' detected in image."
+            }
+        # Ambiguous: multiple matches
+        return {
+            "success": False,
+            "reference": reference,
+            "error": f"Found {len(matching)} '{label}' objects; be more specific. Try 'first {label} from left', 'second {label} from right', 'leftmost {label}', or 'middle {label}'."
+        }
+    
+    # Pattern 3: "first/second/third LABEL from left/right" or "first/second/third LABEL" (defaults to left)
+    # Try with explicit direction first (with optional "the" after "from")
+    match = re.match(r"^(first|second|third|\d+(?:st|nd|rd|th)?)\s+(\w+)\s+from\s+(?:the\s+)?(left|right)$", ref)
+    if match:
+        pos_word = match.group(1)
+        label = match.group(2)
+        direction = match.group(3)
+    else:
+        # Try without direction (defaults to left-to-right)
+        match = re.match(r"^(first|second|third|\d+(?:st|nd|rd|th)?)\s+(\w+)$", ref)
+        if match:
+            pos_word = match.group(1)
+            label = match.group(2)
+            direction = "left"
+        else:
+            match = None
+    
+    if match:
+        # Map word to index
+        pos_map = {"first": 0, "second": 1, "third": 2}
+        if pos_word in pos_map:
+            position = pos_map[pos_word]
+        else:
+            # Try parsing as number with ordinal suffix (e.g., "1st", "2nd")
+            try:
+                num_str = re.sub(r"(?:st|nd|rd|th)$", "", pos_word)
+                position = int(num_str) - 1
+            except (ValueError, IndexError):
+                return {
+                    "success": False,
+                    "reference": reference,
+                    "error": f"Could not parse position: '{pos_word}'"
+                }
+        
+        # Find all detections matching the label
+        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
+        if not matching:
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"No '{label}' detected in image."
+            }
+        
+        # Sort by bbox center (horizontal position)
+        if direction == "left":
+            matching.sort(key=lambda i: (detections[i]["bbox"][0] + detections[i]["bbox"][2]) / 2)
+        else:  # right
+            matching.sort(key=lambda i: (detections[i]["bbox"][0] + detections[i]["bbox"][2]) / 2, reverse=True)
+        
+        if position >= len(matching):
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"Only {len(matching)} '{label}' object(s) found from {direction}; requested position {position+1}."
+            }
+        
+        obj_id = matching[position]
+        det = detections[obj_id]
+        return {
+            "success": True,
+            "reference": reference,
+            "object_id": obj_id,
+            "label": det["label"],
+            "confidence": det["confidence"],
+            "bbox": det["bbox"]
+        }
+    
+    # Pattern 4: "leftmost/rightmost LABEL" or "left/right LABEL" or "LABEL on the left/right"
+    # Try "leftmost/rightmost LABEL"
+    match = re.match(r"^(leftmost|rightmost)\s+(\w+)$", ref)
+    if match:
+        direction = match.group(1)
+        label = match.group(2)
+        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
+        if not matching:
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"No '{label}' detected in image."
+            }
+        
+        if direction == "leftmost":
+            obj_id = min(matching, key=lambda i: detections[i]["bbox"][0])
+        else:  # rightmost
+            obj_id = max(matching, key=lambda i: detections[i]["bbox"][2])
+        
+        det = detections[obj_id]
+        return {
+            "success": True,
+            "reference": reference,
+            "object_id": obj_id,
+            "label": det["label"],
+            "confidence": det["confidence"],
+            "bbox": det["bbox"]
+        }
+    
+    # Try "left/right LABEL" (maps to leftmost/rightmost)
+    match = re.match(r"^(left|right)\s+(\w+)$", ref)
+    if match:
+        direction = match.group(1)
+        label = match.group(2)
+        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
+        if not matching:
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"No '{label}' detected in image."
+            }
+        
+        if direction == "left":
+            obj_id = min(matching, key=lambda i: detections[i]["bbox"][0])
+        else:  # right
+            obj_id = max(matching, key=lambda i: detections[i]["bbox"][2])
+        
+        det = detections[obj_id]
+        return {
+            "success": True,
+            "reference": reference,
+            "object_id": obj_id,
+            "label": det["label"],
+            "confidence": det["confidence"],
+            "bbox": det["bbox"]
+        }
+    
+    # Try "LABEL on the left/right"
+    match = re.match(r"^(\w+)\s+on\s+the\s+(left|right)$", ref)
+    if match:
+        label = match.group(1)
+        direction = match.group(2)
+        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
+        if not matching:
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"No '{label}' detected in image."
+            }
+        
+        if direction == "left":
+            obj_id = min(matching, key=lambda i: detections[i]["bbox"][0])
+        else:  # right
+            obj_id = max(matching, key=lambda i: detections[i]["bbox"][2])
+        
+        det = detections[obj_id]
+        return {
+            "success": True,
+            "reference": reference,
+            "object_id": obj_id,
+            "label": det["label"],
+            "confidence": det["confidence"],
+            "bbox": det["bbox"]
+        }
+    
+    # Pattern 5: "middle LABEL"
+    match = re.match(r"^middle\s+(\w+)$", ref)
+    if match:
+        label = match.group(1)
+        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
+        if not matching:
+            return {
+                "success": False,
+                "reference": reference,
+                "error": f"No '{label}' detected in image."
+            }
+        
+        # Sort by bbox center and take median
+        matching.sort(key=lambda i: (detections[i]["bbox"][0] + detections[i]["bbox"][2]) / 2)
+        obj_id = matching[len(matching) // 2]
+        det = detections[obj_id]
+        return {
+            "success": True,
+            "reference": reference,
+            "object_id": obj_id,
+            "label": det["label"],
+            "confidence": det["confidence"],
+            "bbox": det["bbox"]
+        }
+    
+    return {
+        "success": False,
+        "reference": reference,
+        "error": f"Could not parse reference: '{reference}'. Try 'object 0', 'the dog', 'first person from left', 'leftmost car', 'left person', 'person on the left', or 'middle person'."
+    }
+
+def _validate_and_get_detection(object_id: int):
+    """Validate context and get detection object.
+    
+    Returns:
+        tuple: (detection_dict, label_str) on success
+        str: JSON error response on failure
+    """
+    image_b64 = _current_image_b64.get()
+    detections = _current_detections.get()
+    chat_id = _current_chat_id.get()
+    
+    logging.info(f"🔍 _validate_and_get_detection({object_id}): detections_contextvar={len(detections) if detections else 0}, chat_id={chat_id}")
+    
+    # Fallback to persistent state if ContextVar is empty (ContextVar isolation across tool calls)
+    if not detections and chat_id and chat_id in _chat_image_state:
+        detections = _chat_image_state[chat_id].get("detections", [])
+        logging.info(f"   ↳ Restored {len(detections)} detections from persistent state")
+    
+    if not image_b64:
+        return json.dumps({"error": "No image available. Please detect objects first."})
+    
+    if not detections:
+        logging.info(f"   ↳ No detections available (none in contextvar, fallback empty/missing)")
+        return json.dumps({"error": "No detections available. Please detect objects first."})
+    
+    if object_id < 0 or object_id >= len(detections):
+        return json.dumps({"error": f"Invalid object_id {object_id}. Available objects: 0-{len(detections)-1}"})
+    
+    detection = detections[object_id]
+    return detection, detection["label"]
+
+def _update_image_and_respond(modified_image_b64: str, label: str, object_id: int, action: str, details: str = ""):
+    """Update context and detection result, return success response.
+    
+    Args:
+        modified_image_b64: Updated image in base64
+        label: Object label for message
+        object_id: Object ID for message
+        action: Action name (e.g., "blurred", "cropped")
+        details: Additional details for message (e.g., "with radius 5.0")
+    
+    Returns:
+        str: JSON success response
+    """
+    _set_current_image(modified_image_b64)
+    
+    message = f"Successfully {action} {label} (object #{object_id})"
+    if details:
+        message += f" {details}"
+    
+    return json.dumps({
+        "success": True,
+        "message": message
+    })
+
+@tool
+def blur_object(object_id: int, radius: float = 2.0) -> str:
+    """Blur a detected object in the image. Specify the object ID and blur radius (default 2.0)."""
+    # Step 1: Validate and get detection
+    result = _validate_and_get_detection(object_id)
+    if isinstance(result, str):
+        return result  # Error response
+    detection, label = result
+    bbox = detection["bbox"]
+    # Convert bbox coordinates to integers (YOLO returns floats)
+    left, top, right, bottom = tuple(int(round(coord)) for coord in bbox)
+    
+    # Step 2: Get current image
+    image_b64 = _current_image_b64.get()
+    
+    try:
+        client = MCPClient()
+        
+        # Step 3: MCP crop
+        logging.info(f"🔍 blur_object: Cropping object {object_id} bbox ({left}, {top}, {right}, {bottom})")
+        cropped_b64 = client.crop(image_b64, left, top, right, bottom)
+        logging.info(f"   ✓ Cropped: {len(cropped_b64)} chars")
+        
+        # Step 4: MCP blur
+        logging.info(f"🔍 blur_object: Blurring cropped region (radius={radius})")
+        blurred_b64 = client.blur(cropped_b64, radius)
+        logging.info(f"   ✓ Blurred: {len(blurred_b64)} chars")
+        
+        # Step 5: MCP paste_region
+        logging.info(f"🔍 blur_object: Pasting blurred region back into full image")
+        modified_image_b64 = client.paste_region(image_b64, blurred_b64, left, top, right, bottom)
+        logging.info(f"   ✓ Composited: {len(modified_image_b64)} chars")
+        
+        # Step 6: Update and respond
+        return _update_image_and_respond(
+            modified_image_b64,
+            label,
+            object_id,
+            "blurred",
+            f"with radius {radius}"
+        )
+    
+    except Exception as e:
+        logging.error(f"❌ blur_object failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to blur object: {str(e)}"})
+
+@tool
+def crop_object(object_id: int, left_offset: int = 0, top_offset: int = 0, right_offset: int = 0, bottom_offset: int = 0) -> str:
+    """Crop a detected object from the image. Specify the object ID and optional pixel offsets to expand/shrink the crop region."""
+    # Validate and get detection
+    result = _validate_and_get_detection(object_id)
+    if isinstance(result, str):
+        return result  # Error response
+    detection, label = result
+    bbox = detection["bbox"]
+    # Convert bbox coordinates to integers (YOLO returns floats)
+    bbox = tuple(int(round(coord)) for coord in bbox)
+    
+    image_b64 = _current_image_b64.get()
+    
+    # Apply offsets to bbox: (x1, y1, x2, y2)
+    x1, y1, x2, y2 = bbox
+    left = int(x1 - left_offset)
+    top = int(y1 - top_offset)
+    right = int(x2 + right_offset)
+    bottom = int(y2 + bottom_offset)
+    
+    try:
+        # Get current image and crop region
+        client = MCPClient()
+        cropped_b64 = client.crop(image_b64, left, top, right, bottom)
+        
+        # Update and respond
+        return _update_image_and_respond(
+            cropped_b64,
+            label,
+            object_id,
+            "cropped",
+            f"to region [{left}, {top}, {right}, {bottom}]"
+        )
+    
+    except Exception as e:
+        return json.dumps({"error": f"Failed to crop object: {str(e)}"})
+
+@tool
+def blur_image(radius: float = 2.0) -> str:
+    """Apply Gaussian blur to the entire image. Specify the blur radius (default 2.0 pixels)."""
+    image_b64 = _current_image_b64.get()
+    
+    if not image_b64:
+        return json.dumps({"error": "No image available. Please provide an image first."})
+    
+    try:
+        logging.info(f"🔵 blur_image: Calling MCP blur with radius={radius}")
+        logging.info(f"   Input image size: {len(image_b64)} chars")
+        
+        # Call MCP service to blur the full image
+        client = MCPClient()
+        blurred_b64 = client.blur(image_b64, radius)
+        
+        logging.info(f"   Output image size: {len(blurred_b64)} chars")
+        logging.info(f"   ✅ MCP blur completed successfully")
+        
+        # Update all image state with the blurred result
+        _set_current_image(blurred_b64)
+        
+        return json.dumps({
+            "success": True,
+            "message": f"Successfully blurred the entire image with radius {radius}",
+            "image_updated": True
+        })
+    
+    except Exception as e:
+        logging.error(f"❌ blur_image failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to blur image: {str(e)}"})
+
+@tool
+def rotate_image(angle: float) -> str:
+    """Rotate the entire image. Specify the rotation angle in degrees."""
+    image_b64 = _current_image_b64.get()
+    
+    if not image_b64:
+        return json.dumps({"error": "No image available. Please provide an image first."})
+    
+    try:
+        logging.info(f"🔵 rotate_image: Calling MCP rotate with angle={angle}")
+        logging.info(f"   Input image size: {len(image_b64)} chars")
+        
+        # Call MCP service to rotate the full image
+        client = MCPClient()
+        rotated_b64 = client.rotate(image_b64, angle)
+        
+        logging.info(f"   Output image size: {len(rotated_b64)} chars")
+        logging.info(f"   ✅ MCP rotate completed successfully")
+        
+        # Update all image state with the rotated result
+        _set_current_image(rotated_b64)
+        
+        return json.dumps({
+            "success": True,
+            "message": f"Successfully rotated the entire image by {angle} degrees",
+            "image_updated": True
+        })
+    
+    except Exception as e:
+        logging.error(f"❌ rotate_image failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to rotate image: {str(e)}"})
+
+@tool
+def flip_image(direction: str) -> str:
+    """Flip the entire image horizontally or vertically. Direction must be 'horizontal' or 'vertical'."""
+    if direction not in ["horizontal", "vertical"]:
+        return json.dumps({"error": f"Invalid direction '{direction}'. Must be 'horizontal' or 'vertical'."})
+    
+    image_b64 = _current_image_b64.get()
+    
+    if not image_b64:
+        return json.dumps({"error": "No image available. Please provide an image first."})
+    
+    try:
+        logging.info(f"🔵 flip_image: Calling MCP flip with direction={direction}")
+        logging.info(f"   Input image size: {len(image_b64)} chars")
+        
+        # Call MCP service to flip the full image
+        client = MCPClient()
+        flipped_b64 = client.flip(image_b64, direction)
+        
+        logging.info(f"   Output image size: {len(flipped_b64)} chars")
+        logging.info(f"   ✅ MCP flip completed successfully")
+        
+        # Update all image state with the flipped result
+        _set_current_image(flipped_b64)
+        
+        return json.dumps({
+            "success": True,
+            "message": f"Successfully flipped the entire image {direction}",
+            "image_updated": True
+        })
+    
+    except Exception as e:
+        logging.error(f"❌ flip_image failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to flip image: {str(e)}"})
+
+@tool
+def resize_image(width: int, height: int) -> str:
+    """Resize the entire image to specified dimensions. Width and height must be positive integers."""
+    if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+        return json.dumps({"error": "Width and height must be positive integers."})
+    
+    image_b64 = _current_image_b64.get()
+    
+    if not image_b64:
+        return json.dumps({"error": "No image available. Please provide an image first."})
+    
+    try:
+        logging.info(f"🔵 resize_image: Calling MCP resize with width={width}, height={height}")
+        logging.info(f"   Input image size: {len(image_b64)} chars")
+        
+        # Call MCP service to resize the full image
+        client = MCPClient()
+        resized_b64 = client.resize(image_b64, width, height)
+        
+        logging.info(f"   Output image size: {len(resized_b64)} chars")
+        logging.info(f"   ✅ MCP resize completed successfully")
+        
+        # Update all image state with the resized result
+        _set_current_image(resized_b64)
+        
+        return json.dumps({
+            "success": True,
+            "message": f"Successfully resized the entire image to {width}x{height}",
+            "image_updated": True
+        })
+    
+    except Exception as e:
+        logging.error(f"❌ resize_image failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to resize image: {str(e)}"})
+
+@tool
+def add_noise_image(amount: float = 0.1) -> str:
+    """Add noise to the entire image. Amount must be between 0.0 and 1.0."""
+    if not isinstance(amount, (int, float)) or amount < 0.0 or amount > 1.0:
+        return json.dumps({"error": "Amount must be a number between 0.0 and 1.0."})
+    
+    image_b64 = _current_image_b64.get()
+    
+    if not image_b64:
+        return json.dumps({"error": "No image available. Please provide an image first."})
+    
+    try:
+        logging.info(f"🔵 add_noise_image: Calling MCP add_noise with amount={amount}")
+        logging.info(f"   Input image size: {len(image_b64)} chars")
+        
+        # Call MCP service to add noise to the full image
+        client = MCPClient()
+        noisy_b64 = client.add_noise(image_b64, amount)
+        
+        logging.info(f"   Output image size: {len(noisy_b64)} chars")
+        logging.info(f"   ✅ MCP add_noise completed successfully")
+        
+        # Update all image state with the noisy result
+        _set_current_image(noisy_b64)
+        
+        return json.dumps({
+            "success": True,
+            "message": f"Successfully added noise to the entire image with amount {amount}",
+            "image_updated": True
+        })
+    
+    except Exception as e:
+        logging.error(f"❌ add_noise_image failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to add noise to image: {str(e)}"})
+
+@tool
+def add_noise_object(object_id: int, amount: float = 0.1) -> str:
+    """Add noise to a detected object in the image. Specify the object ID and noise amount (0.0-1.0)."""
+    # Validate amount
+    if not isinstance(amount, (int, float)) or amount < 0.0 or amount > 1.0:
+        return json.dumps({"error": "Amount must be a number between 0.0 and 1.0."})
+    
+    # Step 1: Validate and get detection
+    result = _validate_and_get_detection(object_id)
+    if isinstance(result, str):
+        return result  # Error response
+    detection, label = result
+    bbox = detection["bbox"]
+    # Convert bbox coordinates to integers (YOLO returns floats)
+    left, top, right, bottom = tuple(int(round(coord)) for coord in bbox)
+    
+    # Step 2: Get current image
+    image_b64 = _current_image_b64.get()
+    
+    try:
+        client = MCPClient()
+        
+        # Step 3: MCP crop
+        logging.info(f"🔍 add_noise_object: Cropping object {object_id} bbox ({left}, {top}, {right}, {bottom})")
+        cropped_b64 = client.crop(image_b64, left, top, right, bottom)
+        logging.info(f"   ✓ Cropped: {len(cropped_b64)} chars")
+        
+        # Step 4: MCP add_noise
+        logging.info(f"🔍 add_noise_object: Adding noise to cropped region (amount={amount})")
+        noisy_b64 = client.add_noise(cropped_b64, amount)
+        logging.info(f"   ✓ Noisy: {len(noisy_b64)} chars")
+        
+        # Step 5: MCP paste_region
+        logging.info(f"🔍 add_noise_object: Pasting noisy region back into full image")
+        modified_image_b64 = client.paste_region(image_b64, noisy_b64, left, top, right, bottom)
+        logging.info(f"   ✓ Composited: {len(modified_image_b64)} chars")
+        
+        # Step 6: Update and respond
+        return _update_image_and_respond(
+            modified_image_b64,
+            label,
+            object_id,
+            "added noise to",
+            f"with amount {amount}"
+        )
+    
+    except Exception as e:
+        logging.error(f"❌ add_noise_object failed: {str(e)}", exc_info=True)
+        return json.dumps({"error": f"Failed to add noise to object: {str(e)}"})
+
 # Registry: map tool name -> tool function
 TOOLS = {
-    detect_objects.name: detect_objects
+    detect_objects.name: detect_objects,
+    resolve_object_reference.name: resolve_object_reference,
+    blur_object.name: blur_object,
+    crop_object.name: crop_object,
+    blur_image.name: blur_image,
+    rotate_image.name: rotate_image,
+    flip_image.name: flip_image,
+    resize_image.name: resize_image,
+    add_noise_image.name: add_noise_image,
+    add_noise_object.name: add_noise_object,
 }
 
 # Parse MODEL string (format: "provider:model_id")
@@ -148,10 +920,12 @@ class ChatMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    chat_id: Optional[str] = None       # session identifier (None for new conversation)
     messages: list[ChatMessage]         # full conversation thread, oldest first
 
 
 class ChatResponse(BaseModel):
+    chat_id: Optional[str] = None       # session identifier for next request (set by /chat endpoint)
     response: str
     prediction_id: Optional[str] = None
     annotated_image: Optional[str] = None
@@ -187,7 +961,44 @@ def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
     tokens_used = TokensUsed()
 
     for iteration in range(1, max_iterations + 1):
+        # ===== DEBUG: Log messages before invoke =====
+        print(f"\n{'='*80}")
+        print(f"ITERATION {iteration}: About to invoke LLM")
+        print(f"{'='*80}")
+        print(f"Total messages: {len(messages)}")
+        
+        has_successfully_blurred = False
+        for i, msg in enumerate(messages):
+            msg_type = type(msg).__name__
+            content = msg.content if hasattr(msg, "content") else str(msg)
+            if isinstance(content, list):
+                content_str = str(content)[:300]
+            else:
+                content_str = str(content)[:300]
+            
+            print(f"  [{i}] {msg_type}: {content_str}...")
+            
+            if msg_type == "AIMessage" and "successfully blurred" in str(msg.content).lower():
+                has_successfully_blurred = True
+        
+        print(f"\nPrevious messages contain 'successfully blurred': {has_successfully_blurred}")
+        print(f"{'='*80}\n")
+        
         response: AIMessage = llm_with_tools.invoke(messages)
+        
+        # ===== DEBUG: Log response after invoke =====
+        print(f"\n{'='*80}")
+        print(f"ITERATION {iteration}: LLM Response")
+        print(f"{'='*80}")
+        response_content = response.content if hasattr(response, "content") else str(response)
+        if isinstance(response_content, list):
+            response_content_str = str(response_content)[:300]
+        else:
+            response_content_str = str(response_content)[:300]
+        print(f"Response content (first 300 chars): {response_content_str}...")
+        print(f"Response tool_calls: {response.tool_calls}")
+        print(f"{'='*80}\n")
+        
         usage = getattr(response, "usage_metadata", None) or {}
 
         tokens_used.input += usage.get("input_tokens", 0)
@@ -256,13 +1067,30 @@ app.add_middleware(
 def chat(request: ChatRequest):
     lc_messages = []
     latest_image_s3_key = None
-    chat_id = str(uuid.uuid4())
+    current_image_b64 = None  # Will hold base64 image data
     prediction_id = str(uuid.uuid4())
+    new_image_uploaded = False  # Track if a new image was uploaded in this request
+    restored_detections = []  # Detections to restore from previous request
+    
+    # Restore or create chat session
+    if request.chat_id and request.chat_id in _chat_image_state:
+        # Follow-up request: restore existing session
+        chat_id = request.chat_id
+        latest_image_s3_key = _chat_image_state[chat_id].get("current_s3_key")
+        restored_detections = _chat_image_state[chat_id].get("detections", [])
+        logging.info(f"🔄 Restored session {chat_id}: current_s3_key={latest_image_s3_key}, detections={len(restored_detections)}")
+    else:
+        # New request: generate new chat_id
+        chat_id = str(uuid.uuid4())
+        latest_image_s3_key = None
+        _chat_image_state[chat_id] = {}  # Initialize state for new chat
+        logging.info(f"✨ Created new chat session: {chat_id}")
 
     for msg in request.messages:
         if msg.role == "user":
             if msg.image_base64:
-                # Upload original image to S3
+                # New image uploaded - this replaces any previous image
+                new_image_uploaded = True
                 try:
                     image_bytes = base64.b64decode(msg.image_base64)
                     latest_image_s3_key = upload_image_to_s3(
@@ -272,6 +1100,17 @@ def chat(request: ChatRequest):
                         original_filename="original.jpg"
                     )
                     logging.info(f"Image uploaded to S3: {latest_image_s3_key}")
+                    
+                    # Store original and current S3 keys in chat state
+                    _chat_image_state[chat_id]["original_s3_key"] = latest_image_s3_key
+                    _chat_image_state[chat_id]["current_s3_key"] = latest_image_s3_key
+                    
+                    # Clear detections for new image
+                    _chat_image_state[chat_id]["detections"] = []
+                    restored_detections = []
+                    
+                    # Convert uploaded image to base64 for immediate use (no re-download)
+                    current_image_b64 = msg.image_base64
                 except Exception as e:
                     logging.error(f"Failed to upload image to S3: {e}")
                     return ChatResponse(
@@ -290,20 +1129,159 @@ def chat(request: ChatRequest):
         else:
             lc_messages.append(AIMessage(content=msg.content))
 
+    # If no new image was uploaded but we have a current_s3_key, download it for restoration
+    if not new_image_uploaded and latest_image_s3_key:
+        try:
+            logging.info(f"Restoring image from S3: {latest_image_s3_key}")
+            image_bytes = download_image_from_s3(latest_image_s3_key)
+            current_image_b64 = bytes_to_b64(image_bytes)
+            logging.info(f"Image restored from S3 (size: {len(current_image_b64)} chars)")
+        except Exception as e:
+            logging.error(f"Failed to restore image from S3: {e}")
+            # Continue without image rather than failing
+
     _detection_result["prediction_id"] = None
     _detection_result["annotated_image"] = None
+    _detection_result["final_image_b64"] = None  # Phase 5: Store final image after tool modifications
+
+    # Phase 5: Store initial image for change detection
+    initial_image_b64 = current_image_b64
 
     # Set context variables for the agent
     image_token = _current_image_s3_key.set(latest_image_s3_key)
     chat_token = _current_chat_id.set(chat_id)
     pred_token = _current_prediction_id.set(prediction_id)
+    image_b64_token = _current_image_b64.set(current_image_b64)  # Set with restored or uploaded image
+    detections_token = _current_detections.set(restored_detections)  # Restore previous detections
+    logging.info(f"📸 Set context vars: image_s3_key={latest_image_s3_key}, detections={len(restored_detections)}")
+
+    # Phase 6: Sanitize message history to break pattern-matching
+    # Replace prior assistant messages that confirm image-operation success with neutral summaries
+    sanitized_lc_messages = []
+    for msg in lc_messages:
+        if isinstance(msg, AIMessage):
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            
+            # Check if this is a success confirmation message (not the current response)
+            is_success_confirmation = any([
+                "successfully blurred" in content.lower(),
+                "blur operation" in content.lower() and "successful" in content.lower(),
+                "successfully cropped" in content.lower(),
+                "successfully rotated" in content.lower(),
+                "successfully flipped" in content.lower(),
+                "successfully resized" in content.lower(),
+                "successfully added noise" in content.lower(),
+                "operation was successful" in content.lower() and any(op in content.lower() for op in ["blur", "crop", "rotate", "flip", "resize", "noise"]),
+            ])
+            
+            if is_success_confirmation:
+                # Replace with neutral summary to avoid pattern-matching
+                logging.info(f"🧹 Sanitizing prior success message (first 80 chars): {content[:80]}")
+                sanitized_lc_messages.append(AIMessage(
+                    content="[Previous assistant response summarized: an image operation result was shown to the user.]"
+                ))
+            else:
+                sanitized_lc_messages.append(msg)
+        else:
+            sanitized_lc_messages.append(msg)
 
     try:
-        return run_agent(lc_messages)
+        response = run_agent(sanitized_lc_messages)
+        response.chat_id = chat_id  # Always return current chat_id
+        
+        # Hallucination guard with two-tier strategy
+        latest_user_msg = ""
+        for msg in reversed(request.messages):
+            if msg.role == "user":
+                latest_user_msg = msg.content.lower()
+                break
+        
+        # Check for modification keywords (strong guard - always require tools)
+        modification_keywords = {"blur", "crop", "rotate", "flip", "resize", "noise", "modify", "edit", "transform"}
+        user_asked_for_modification = any(keyword in latest_user_msg for keyword in modification_keywords)
+        
+        # Check for detect keywords (smart guard - only guard if no prior detections)
+        user_asked_for_detect = "detect objects" in latest_user_msg or "detect all" in latest_user_msg
+        prior_detections = _current_detections.get() or _chat_image_state.get(chat_id, {}).get("detections", [])
+        
+        # STRONG GUARD: Modification commands must always invoke tools
+        if response.tools_called == [] and user_asked_for_modification:
+            logging.warning(f"❌ HALLUCINATION GUARD (modification): User requested image modification but no tools invoked. User msg: '{latest_user_msg}'. LLM response: '{response.response}'")
+            return ChatResponse(
+                chat_id=chat_id,
+                response=f"I could not perform the requested image operation. Please try again or rephrase your request.",
+                prediction_id=_detection_result["prediction_id"],
+                annotated_image=_detection_result["annotated_image"],
+                agent_loop_time_s=response.agent_loop_time_s,
+                iterations=response.iterations,
+                tools_called=[],
+                context_limit_exceeded=False,
+                tokens_used=response.tokens_used,
+            )
+        
+        # SMART GUARD: Detect only errors if no prior detections and tools not called
+        if response.tools_called == [] and user_asked_for_detect and not prior_detections:
+            logging.warning(f"❌ HALLUCINATION GUARD (detect): User requested object detection but no tools invoked and no prior detections. User msg: '{latest_user_msg}'. LLM response: '{response.response}'")
+            return ChatResponse(
+                chat_id=chat_id,
+                response=f"I could not detect objects. Please try again or rephrase your request.",
+                prediction_id=_detection_result["prediction_id"],
+                annotated_image=_detection_result["annotated_image"],
+                agent_loop_time_s=response.agent_loop_time_s,
+                iterations=response.iterations,
+                tools_called=[],
+                context_limit_exceeded=False,
+                tokens_used=response.tokens_used,
+            )
+        
+        # Persist detections back to chat state after agent completes
+        final_detections = _current_detections.get()
+        logging.info(f"🔄 Checking detection persistence: current={len(final_detections)} items, was_restored={len(restored_detections)}")
+        if final_detections:  # Only update if detections were set (e.g., by detect_objects)
+            _chat_image_state[chat_id]["detections"] = final_detections
+            logging.info(f"✅ Persisted {len(final_detections)} detections to chat state for {chat_id}")
+        else:
+            # Ensure detections key exists even if empty
+            if "detections" not in _chat_image_state[chat_id]:
+                _chat_image_state[chat_id]["detections"] = []
+            logging.info(f"✅ Detections state consistent: {len(_chat_image_state[chat_id]['detections'])} items in state")
+        
+        # Phase 5: Persist final working image if it changed during the request
+        # Tools store their final output in _detection_result["final_image_b64"] to bypass ContextVar context isolation
+        final_image_b64 = _detection_result.get("final_image_b64") or _current_image_b64.get()
+        initial_len = len(initial_image_b64 or '')
+        final_len = len(final_image_b64 or '')
+        logging.info(f"📊 Phase 5 image comparison: initial={initial_len} chars, final={final_len} chars, equal={initial_image_b64 == final_image_b64}")
+        if final_image_b64 and final_image_b64 != initial_image_b64:
+            try:
+                logging.info(f"🖼️ Image was modified during request: {initial_len} → {final_len} chars")
+                image_bytes = base64.b64decode(final_image_b64)
+                
+                # Generate fresh UUID for modified image upload
+                # Not a YOLO prediction_id; upload_image_to_s3 uses this parameter for S3 key construction.
+                modified_upload_id = str(uuid.uuid4())
+                
+                new_s3_key = upload_image_to_s3(
+                    image_bytes=image_bytes,
+                    chat_id=chat_id,
+                    prediction_id=modified_upload_id,
+                    original_filename="working.jpg"
+                )
+                _chat_image_state[chat_id]["current_s3_key"] = new_s3_key
+                logging.info(f"✅ Persisted modified image to S3: {new_s3_key}")
+            except Exception as e:
+                logging.error(f"❌ Failed to persist modified image: {e}", exc_info=True)
+                # Continue without S3 persistence - don't fail the whole request
+        else:
+            logging.info(f"🔵 Image unchanged: no persistence needed (final_image_b64 is None: {final_image_b64 is None})")
+        
+        return response
     finally:
         _current_image_s3_key.reset(image_token)
         _current_chat_id.reset(chat_token)
         _current_prediction_id.reset(pred_token)
+        _current_image_b64.reset(image_b64_token)
+        _current_detections.reset(detections_token)
 
 @app.get("/health")
 def health():

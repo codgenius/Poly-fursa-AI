@@ -13,6 +13,7 @@ export default function Chat() {
   const [imageB64, setImageB64] = useState<string | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [chatId, setChatId] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -60,7 +61,15 @@ export default function Chat() {
     setLoading(true);
 
     try {
-      const reply = await sendMessage(next);
+      // Strip image_base64 from previous messages to prevent re-uploading old images
+      const messagesToSend = messages.map(msg => {
+        const { image_base64, ...rest } = msg;
+        return rest;
+      });
+      messagesToSend.push(userMessage);
+
+      const reply = await sendMessage(messagesToSend, chatId ?? undefined);
+      if (reply.chat_id) setChatId(reply.chat_id);
       setMessages([
         ...next,
         {
