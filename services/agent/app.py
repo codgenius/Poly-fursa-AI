@@ -51,49 +51,83 @@ if MODEL not in ALLOWED_MODELS:
 
 SYSTEM_PROMPT = (
     "You are an AI vision assistant helping users understand and modify images.\n\n"
+    "[CRITICAL CONSTRAINT] YOU CANNOT SEE THE IMAGE DIRECTLY\n"
+    "- You have NO access to image pixels or visual content\n"
+    "- You can ONLY see what detect_objects() tells you\n"
+    "- If you haven't called detect_objects(), you don't know what's in the image\n"
+    "- DO NOT guess or assume what's in the image\n"
+    "- DO NOT claim success without calling the actual tool (blur, crop, etc.)\n"
+    "- If user says 'blur the leftmost person' and you haven't called detect_objects or blur, that's a HALLUCINATION\n\n"
+    "[OBJECT DETECTION FORMAT]\n"
+    "When detect_objects() returns results, you receive a list of detections with:\n"
+    "- object_id: 0-based index (0 is first object)\n"
+    "- label: object class name (e.g., 'person', 'dog', 'car')\n"
+    "- bbox: [x1, y1, x2, y2] where x1,y1 = top-left, x2,y2 = bottom-right\n"
+    "- confidence: confidence score 0.0-1.0\n\n"
+    "CRITICAL: FILTER BY LABEL FIRST!\n"
+    "When user says 'blur the leftmost person':\n"
+    "  1. FILTER: Select ONLY detections with label='person'\n"
+    "  2. THEN: Apply position logic (find min x1 among filtered persons)\n"
+    "  3. DO NOT take overall leftmost if it's a car!\n\n"
+    "POSITION REASONING from filtered bboxes:\n"
+    "- LEFTMOST: object with smallest x1 value (among filtered by label)\n"
+    "- RIGHTMOST: object with largest x2 value (among filtered by label)\n"
+    "- TOPMOST: object with smallest y1 value (among filtered by label)\n"
+    "- BOTTOMMOST: object with largest y2 value (among filtered by label)\n"
+    "- CENTER X of object: (x1 + x2) / 2\n\n"
     "[CRITICAL] AFTER get_mcp_tools(), YOU MUST IMMEDIATELY USE THE TOOLS:\n"
     "- When you call get_mcp_tools() and receive the tool list, CONTINUE IN THE SAME MESSAGE\n"
     "- DO NOT respond with thinking text and wait for next iteration\n"
     "- DO NOT respond with 'tools are now available' and then stop\n"
-    "- IMMEDIATELY after receiving tools, INVOKE THE ACTUAL TOOL the user requested\n"
-    "- Example: User says 'blur' → Call get_mcp_tools() → THEN call blur() in same response\n\n"
+    "- IMMEDIATELY after receiving tools, INVOKE THE ACTUAL TOOL the user requested\n\n"
     "[AUTO-INJECT] IMAGE AUTO-INJECTION - Tools automatically get the current image:\n"
     "- When you call blur(), crop(), rotate(), etc., DO NOT specify image_b64\n"
     "- The tool wrapper automatically provides the current image from context\n"
-    "- Just call: blur(radius=5.0) - no image_b64 needed!\n"
-    "- The tool tracks the image across all calls automatically\n\n"
+    "- Just call: blur(radius=5.0) - no image_b64 needed!\n\n"
     "[WARNING] ANTI-SPAM RULE - Only call get_mcp_tools() ONCE:\n"
     "- Call get_mcp_tools() ONLY ONCE when you first need image processing tools\n"
-    "- After tools are loaded, REUSE them for the rest of the conversation\n"
-    "- Never call get_mcp_tools() multiple times - you already have the tools!\n"
-    "- Exception: Only call again if a tool invoke actually FAILS with 'tool not found' error\n\n"
+    "- After tools are loaded, REUSE them for the rest of the conversation\n\n"
     "TOOL AVAILABILITY:\n"
-    "- LOCAL tools (always available): detect_objects, resolve_object_reference, get_mcp_tools\n"
-    "- MCP tools (image processing): blur, crop, rotate, flip, resize, add_noise, paste_region\n"
-    "- MCP tools are loaded on-demand by calling get_mcp_tools() ONCE\n\n"
+    "- LOCAL tools (always available): detect_objects, get_mcp_tools\n"
+    "- MCP tools (image processing): blur, crop, rotate, flip, resize, add_noise, paste_region\n\n"
     "CRITICAL WORKFLOW - DO THIS CORRECTLY:\n\n"
-    "When user asks 'Blur the image':\n"
-    "  1. Check if you have blur tool\n"
-    "  2. If NOT: Call get_mcp_tools() to load all tools\n"
-    "  3. SAME RESPONSE - Call blur(radius=5.0) [image auto-injected!]\n"
-    "  4. Report: 'Successfully blurred the image'\n\n"
-    "When user asks 'Blur the first person':\n"
-    "  1. Check if you have blur tool\n"
-    "  2. If NOT: Call get_mcp_tools() to load tools\n"
-    "  3. SAME RESPONSE - Call detect_objects()\n"
-    "  4. SAME RESPONSE - Call resolve_object_reference('first person')\n"
-    "  5. SAME RESPONSE - Call blur(left=X, top=Y, right=X2, bottom=Y2, radius=5.0)\n"
-    "  6. Report: 'Successfully blurred the first person'\n\n"
+    "When user sends image + asks 'Blur the leftmost person':\n"
+    "  1. Call detect_objects() to see all detected objects\n"
+    "  2. SAME RESPONSE - Filter: Keep only objects where label='person'\n"
+    "  3. SAME RESPONSE - Find person with smallest x1 (leftmost among persons, not overall!)\n"
+    "  4. SAME RESPONSE - Call get_mcp_tools() if you don't have blur yet\n"
+    "  5. SAME RESPONSE - Call blur(left=X1, top=Y1, right=X2, bottom=Y2, radius=5.0) with that bbox\n"
+    "  6. Report: 'Successfully blurred the leftmost person'\n\n"
+    "When user asks 'Blur the second car from right':\n"
+    "  1. Call detect_objects()\n"
+    "  2. SAME RESPONSE - Filter: Keep only objects where label='car'\n"
+    "  3. SAME RESPONSE - Sort cars by x2 descending (rightmost first), pick second one\n"
+    "  4. SAME RESPONSE - Call blur(left=X1, top=Y1, right=X2, bottom=Y2, radius=5.0)\n"
+    "  5. Report: 'Successfully blurred the second car from right'\n\n"
+    "When user says 'rotate image' (on same image, already detected):\n"
+    "  1. You already HAVE prior detections from previous request\n"
+    "  2. NO NEED to call detect_objects() again\n"
+    "  3. SAME RESPONSE - Call rotate(angle=90) with DEFAULT angle\n"
+    "  4. Report: 'Successfully rotated the image 90 degrees'\n\n"
     "[WRONG] Do NOT do this:\n"
-    "  - Call get_mcp_tools() then respond 'tools loaded' without using them\n"
-    "  - Call get_mcp_tools() multiple times in conversation\n"
-    "  - Respond with thinking instead of calling actual tool\n"
-    "  - Specify image_b64 parameter - tools auto-inject it!\n\n"
+    "  - Respond with thinking instead of using tools\n"
+    "  - Specify image_b64 parameter - tools auto-inject it!\n"
+    "  - Forget to call detect_objects() when you need to find objects by position\n"
+    "  - Claim success without calling the actual tool (blur, crop, etc.)\n"
+    "  - Guess what's in the image without calling detect_objects\n"
+    "  - Ask user for parameters when defaults exist (e.g., ask 'what angle?' for rotate)\n"
+    "  - Call detect_objects() again when you already have prior detections in same session\n\n"
     "RULES:\n"
     "- After calling get_mcp_tools(), you have all 7 MCP tools available\n"
-    "- For full-image: blur(radius=5.0), rotate(angle=90), flip(direction='horizontal')\n"
-    "- For regions: blur(left=X, top=Y, right=X2, bottom=Y2, radius=5.0)\n"
-    "- Report clearly: 'Successfully blurred' or 'Failed: reason'"
+    "- For full-image operations USE DEFAULT VALUES:\n"
+    "  * blur(radius=5.0) - if user just says 'blur image'\n"
+    "  * rotate(angle=90) - if user just says 'rotate image' (90 degrees default)\n"
+    "  * flip(direction='horizontal') - if user just says 'flip image'\n"
+    "  * resize(width=800, height=600) - if user just says 'resize image'\n"
+    "- For regions with detections: use bbox from detections as left/top/right/bottom parameters\n"
+    "- When you have prior detections, you can use blur/crop/rotate on regions WITHOUT calling detect_objects again\n"
+    "- Report clearly: 'Successfully rotated' or 'Failed: reason'\n"
+    "- NEVER claim success without actually calling the tool"
 )
 
 # Context variables for tracking image metadata during agent execution
@@ -119,12 +153,13 @@ _chat_image_state: dict[str, dict] = {}
 
 @tool
 def detect_objects() -> str:
-    """Detect and identify objects in the image provided by the user using YOLO object detection."""
+    """Detect and identify objects in the image provided by the user using YOLO object detection.
+    
+    Returns detailed detection info including bboxes for reasoning about object positions.
+    """
     image_s3_key = _current_image_s3_key.get()
     chat_id = _current_chat_id.get()
     
-    # Generate fresh prediction_id for this detection call (not reusing per-request one)
-    # This ensures YOLO doesn't see duplicate UIDs if detect_objects is called multiple times
     detection_prediction_id = str(uuid.uuid4())
     
     if not image_s3_key:
@@ -157,11 +192,7 @@ def detect_objects() -> str:
 
             annotated_image_b64 = base64.b64encode(image_response.content).decode("utf-8")
             _detection_result["annotated_image"] = annotated_image_b64
-            
-            # Keep working image as clean version (without boxes) - annotated is display-only
-            # Tools like blur_object should work on the original, not the version with boxes
         
-        # Fetch full detection objects from YOLO using the prediction_id
         detections = []
         if prediction_id_from_response:
             detections_response = client.get(
@@ -170,13 +201,10 @@ def detect_objects() -> str:
             detections_response.raise_for_status()
             detection_data = detections_response.json()
             
-            # Parse detection_objects from YOLO response
             if "detection_objects" in detection_data:
                 for idx, obj in enumerate(detection_data["detection_objects"]):
-                    # Parse box format: JSON array string "[x1, y1, x2, y2]"
                     try:
                         box_str = obj.get("box", "[]")
-                        # Handle both JSON array string and direct string formats
                         if isinstance(box_str, str):
                             box_coords = json.loads(box_str)
                         else:
@@ -193,12 +221,18 @@ def detect_objects() -> str:
                     })
         
         _current_detections.set(detections)
-        # Also save to persistent state so other tools in the same request can access detections
-        # (ContextVar isolation prevents same-request tool calls from seeing ContextVar values)
         if chat_id and chat_id in _chat_image_state:
             _chat_image_state[chat_id]["detections"] = detections
-
-    return json.dumps(prediction_data)
+        
+        # Format detection summary for LLM reasoning about positions
+        detection_summary = f"Detected {len(detections)} objects:\n"
+        for det in detections:
+            x1, y1, x2, y2 = det["bbox"]
+            center_x = (x1 + x2) / 2
+            detection_summary += f"  - object_id {det['id']}: {det['label']} (confidence: {det['confidence']:.2f})\n"
+            detection_summary += f"    bbox: left={x1:.1f}, top={y1:.1f}, right={x2:.1f}, bottom={y2:.1f}, center_x={center_x:.1f}\n"
+        
+        return detection_summary
 
 def _create_mcp_tool_wrapper(mcp_tool):
     """Wrap an MCP tool to auto-inject image from context.
@@ -286,49 +320,6 @@ def _create_mcp_tool_wrapper(mcp_tool):
     
     return wrapped_tool
 
-@tool
-def resolve_object_reference(reference: str) -> str:
-    """Resolve natural-language object references to a specific object_id.
-    
-    Examples:
-    - "object 0" → first object
-    - "the dog" / "detected car" → object with that label (error if ambiguous)
-    - "first person from left" / "first person from the left" → leftmost person
-    - "second dog from right" / "second dog from the right" → second from rightmost
-    - "leftmost person" / "left person" / "person on the left" → person with smallest bbox.left
-    - "rightmost car" / "right car" / "car on the right" → car with largest bbox.right
-    - "middle cat" → cat at median horizontal position
-    - "second person" → second person from left (default direction)
-    
-    Robust to full action phrases (e.g., 'blur the second person from right' will work).
-    
-    Returns JSON with object_id, label, confidence, bbox on success.
-    Returns JSON error if no match or ambiguous.
-    """
-    # Preprocess: strip action verbs if user accidentally passed full sentence
-    cleaned_reference = _preprocess_reference(reference)
-    result = _parse_object_reference(cleaned_reference)
-    return json.dumps(result)
-
-def _preprocess_reference(reference: str) -> str:
-    """Strip action verbs from reference if user passed full sentence.
-    
-    Examples:
-      - "blur the second person from the right" → "second person from the right"
-      - "add noise to the dog" → "the dog"
-      - "can you crop the leftmost car" → "the leftmost car"
-      - "second person from right" → "second person from right" (no change)
-    """
-    import re
-    ref = reference.strip()
-    
-    # Strip common action phrases at the start (case-insensitive)
-    # Pattern: optional "can you" or "please", then action verb(s)
-    action_pattern = r"^(?:can you\s+|could you\s+|please\s+)?(blur|crop|add noise to|add salt and pepper noise to|add noise|rotate|flip|resize)\s+(?:the\s+)?"
-    ref = re.sub(action_pattern, "", ref, flags=re.IGNORECASE, count=1)
-    
-    return ref.strip()
-
 def _set_current_image(image_b64: str):
     """Update all image state tracking with a modified image.
     
@@ -338,278 +329,6 @@ def _set_current_image(image_b64: str):
     _current_image_b64.set(image_b64)
     _detection_result["annotated_image"] = image_b64
     _detection_result["final_image_b64"] = image_b64
-
-def _parse_object_reference(reference: str) -> dict:
-    """Parse natural-language object reference and resolve to object info.
-    
-    Supports patterns:
-      - "object 0" → first object
-      - "the dog" / "detected dog" → exact label match (error if ambiguous)
-      - "first/second/third dog from left" → position from left
-      - "first/second/third dog from right" → position from right
-      - "leftmost/rightmost dog" → extreme positions
-      - "middle dog" → median position
-    
-    Returns dict with success info or error.
-    """
-    import re
-    
-    detections = _current_detections.get()
-    chat_id = _current_chat_id.get()
-    
-    # Fallback to persistent state if empty (ContextVar isolation across tool calls)
-    if not detections and chat_id and chat_id in _chat_image_state:
-        detections = _chat_image_state[chat_id].get("detections", [])
-    
-    if not detections:
-        return {"success": False, "reference": reference, "error": "No detections available. Please detect objects first."}
-    
-    ref = reference.strip().lower()
-    
-    # Pattern 1: "object N" or "objectN"
-    match = re.match(r"^object\s*(\d+)$", ref)
-    if match:
-        obj_id = int(match.group(1))
-        if 0 <= obj_id < len(detections):
-            det = detections[obj_id]
-            return {
-                "success": True,
-                "reference": reference,
-                "object_id": obj_id,
-                "label": det["label"],
-                "confidence": det["confidence"],
-                "bbox": det["bbox"]
-            }
-        return {
-            "success": False,
-            "reference": reference,
-            "error": f"object_id {obj_id} out of range [0-{len(detections)-1}]"
-        }
-    
-    # Plural handling: map plural forms to singular
-    plural_to_singular = {
-        "people": "person",
-        "persons": "person",
-        "dogs": "dog",
-        "cats": "cat",
-        "cars": "car",
-        "items": "item",
-        "objects": "object",
-    }
-    for plural, singular in plural_to_singular.items():
-        ref = ref.replace(plural, singular)
-    
-    # Pattern 2: "the LABEL" / "detected LABEL"
-    match = re.match(r"^(?:the|detected)\s+(\w+)$", ref)
-    if match:
-        label = match.group(1)
-        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
-        if len(matching) == 1:
-            obj_id = matching[0]
-            det = detections[obj_id]
-            return {
-                "success": True,
-                "reference": reference,
-                "object_id": obj_id,
-                "label": det["label"],
-                "confidence": det["confidence"],
-                "bbox": det["bbox"]
-            }
-        if len(matching) == 0:
-            return {
-                "success": False,
-                "reference": reference,
-                "error": f"No '{label}' detected in image."
-            }
-        # Ambiguous: multiple matches
-        return {
-            "success": False,
-            "reference": reference,
-            "error": f"Found {len(matching)} '{label}' objects; be more specific. Try 'first {label} from left', 'second {label} from right', 'leftmost {label}', or 'middle {label}'."
-        }
-    
-    # Pattern 3: "first/second/third LABEL from left/right" or "first/second/third LABEL" (defaults to left)
-    # Try with explicit direction first (with optional "the" after "from")
-    match = re.match(r"^(first|second|third|\d+(?:st|nd|rd|th)?)\s+(\w+)\s+from\s+(?:the\s+)?(left|right)$", ref)
-    if match:
-        pos_word = match.group(1)
-        label = match.group(2)
-        direction = match.group(3)
-    else:
-        # Try without direction (defaults to left-to-right)
-        match = re.match(r"^(first|second|third|\d+(?:st|nd|rd|th)?)\s+(\w+)$", ref)
-        if match:
-            pos_word = match.group(1)
-            label = match.group(2)
-            direction = "left"
-        else:
-            match = None
-    
-    if match:
-        # Map word to index
-        pos_map = {"first": 0, "second": 1, "third": 2}
-        if pos_word in pos_map:
-            position = pos_map[pos_word]
-        else:
-            # Try parsing as number with ordinal suffix (e.g., "1st", "2nd")
-            try:
-                num_str = re.sub(r"(?:st|nd|rd|th)$", "", pos_word)
-                position = int(num_str) - 1
-            except (ValueError, IndexError):
-                return {
-                    "success": False,
-                    "reference": reference,
-                    "error": f"Could not parse position: '{pos_word}'"
-                }
-        
-        # Find all detections matching the label
-        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
-        if not matching:
-            return {
-                "success": False,
-                "reference": reference,
-                "error": f"No '{label}' detected in image."
-            }
-        
-        # Sort by bbox center (horizontal position)
-        if direction == "left":
-            matching.sort(key=lambda i: (detections[i]["bbox"][0] + detections[i]["bbox"][2]) / 2)
-        else:  # right
-            matching.sort(key=lambda i: (detections[i]["bbox"][0] + detections[i]["bbox"][2]) / 2, reverse=True)
-        
-        if position >= len(matching):
-            return {
-                "success": False,
-                "reference": reference,
-                "error": f"Only {len(matching)} '{label}' object(s) found from {direction}; requested position {position+1}."
-            }
-        
-        obj_id = matching[position]
-        det = detections[obj_id]
-        return {
-            "success": True,
-            "reference": reference,
-            "object_id": obj_id,
-            "label": det["label"],
-            "confidence": det["confidence"],
-            "bbox": det["bbox"]
-        }
-    
-    # Pattern 4: "leftmost/rightmost LABEL" or "left/right LABEL" or "LABEL on the left/right"
-    # Try "leftmost/rightmost LABEL"
-    match = re.match(r"^(leftmost|rightmost)\s+(\w+)$", ref)
-    if match:
-        direction = match.group(1)
-        label = match.group(2)
-        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
-        if not matching:
-            return {
-                "success": False,
-                "reference": reference,
-                "error": f"No '{label}' detected in image."
-            }
-        
-        if direction == "leftmost":
-            obj_id = min(matching, key=lambda i: detections[i]["bbox"][0])
-        else:  # rightmost
-            obj_id = max(matching, key=lambda i: detections[i]["bbox"][2])
-        
-        det = detections[obj_id]
-        return {
-            "success": True,
-            "reference": reference,
-            "object_id": obj_id,
-            "label": det["label"],
-            "confidence": det["confidence"],
-            "bbox": det["bbox"]
-        }
-    
-    # Try "left/right LABEL" (maps to leftmost/rightmost)
-    match = re.match(r"^(left|right)\s+(\w+)$", ref)
-    if match:
-        direction = match.group(1)
-        label = match.group(2)
-        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
-        if not matching:
-            return {
-                "success": False,
-                "reference": reference,
-                "error": f"No '{label}' detected in image."
-            }
-        
-        if direction == "left":
-            obj_id = min(matching, key=lambda i: detections[i]["bbox"][0])
-        else:  # right
-            obj_id = max(matching, key=lambda i: detections[i]["bbox"][2])
-        
-        det = detections[obj_id]
-        return {
-            "success": True,
-            "reference": reference,
-            "object_id": obj_id,
-            "label": det["label"],
-            "confidence": det["confidence"],
-            "bbox": det["bbox"]
-        }
-    
-    # Try "LABEL on the left/right"
-    match = re.match(r"^(\w+)\s+on\s+the\s+(left|right)$", ref)
-    if match:
-        label = match.group(1)
-        direction = match.group(2)
-        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
-        if not matching:
-            return {
-                "success": False,
-                "reference": reference,
-                "error": f"No '{label}' detected in image."
-            }
-        
-        if direction == "left":
-            obj_id = min(matching, key=lambda i: detections[i]["bbox"][0])
-        else:  # right
-            obj_id = max(matching, key=lambda i: detections[i]["bbox"][2])
-        
-        det = detections[obj_id]
-        return {
-            "success": True,
-            "reference": reference,
-            "object_id": obj_id,
-            "label": det["label"],
-            "confidence": det["confidence"],
-            "bbox": det["bbox"]
-        }
-    
-    # Pattern 5: "middle LABEL"
-    match = re.match(r"^middle\s+(\w+)$", ref)
-    if match:
-        label = match.group(1)
-        matching = [i for i, d in enumerate(detections) if d["label"].lower() == label]
-        if not matching:
-            return {
-                "success": False,
-                "reference": reference,
-                "error": f"No '{label}' detected in image."
-            }
-        
-        # Sort by bbox center and take median
-        matching.sort(key=lambda i: (detections[i]["bbox"][0] + detections[i]["bbox"][2]) / 2)
-        obj_id = matching[len(matching) // 2]
-        det = detections[obj_id]
-        return {
-            "success": True,
-            "reference": reference,
-            "object_id": obj_id,
-            "label": det["label"],
-            "confidence": det["confidence"],
-            "bbox": det["bbox"]
-        }
-    
-    return {
-        "success": False,
-        "reference": reference,
-        "error": f"Could not parse reference: '{reference}'. Try 'object 0', 'the dog', 'first person from left', 'leftmost car', 'left person', 'person on the left', or 'middle person'."
-    }
 
 def _validate_and_get_detection(object_id: int):
     """Validate context and get detection object.
@@ -723,7 +442,7 @@ def get_mcp_tools(refresh: bool = True) -> str:
         logging.error(f"❌ Failed to fetch MCP tools: {e}", exc_info=True)
     
     # Always include local tools in response
-    local_tools = ["detect_objects", "resolve_object_reference"]
+    local_tools = ["detect_objects"]
     for tool_name in local_tools:
         if tool_name in TOOLS:
             tool_obj = TOOLS[tool_name]
@@ -749,7 +468,6 @@ mcp_tools = []
 # Start with LOCAL tools only - MCP tools loaded on-demand via get_mcp_tools()
 TOOLS = {
     detect_objects.name: detect_objects,
-    resolve_object_reference.name: resolve_object_reference,
     get_mcp_tools.name: get_mcp_tools,
 }
 
@@ -1092,19 +810,38 @@ def chat(request: ChatRequest):
                 break
         
         # Check for modification keywords (strong guard - always require tools)
-        modification_keywords = {"blur", "crop", "rotate", "flip", "resize", "noise", "modify", "edit", "transform"}
+        modification_keywords = {"blur", "crop", "rotate", "flip", "resize", "noise", "modify", "edit", "transform", "change", "adjust"}
         user_asked_for_modification = any(keyword in latest_user_msg for keyword in modification_keywords)
         
         # Check for detect keywords (smart guard - only guard if no prior detections)
-        user_asked_for_detect = "detect objects" in latest_user_msg or "detect all" in latest_user_msg
+        detect_keywords = {"detect", "find", "identify", "see", "what's", "whats", "analyze"}
+        user_asked_for_detect = any(keyword in latest_user_msg for keyword in detect_keywords)
         prior_detections = _current_detections.get() or _chat_image_state.get(chat_id, {}).get("detections", [])
         
-        # STRONG GUARD: Modification commands must always invoke tools
-        if response.tools_called == [] and user_asked_for_modification:
-            logging.warning(f"❌ HALLUCINATION GUARD (modification): User requested image modification but no tools invoked. User msg: '{latest_user_msg}'. LLM response: '{response.response}'")
+        logging.info(f"🔍 Hallucination check: tools_called={response.tools_called}, user_msg='{latest_user_msg[:100]}', modification={user_asked_for_modification}, detect={user_asked_for_detect}, prior_detections={len(prior_detections)}")
+        
+        # STRONG GUARD: Image operations need tools, BUT only if we don't have prior detections
+        # If user already detected objects in a prior request, they can do operations without re-detecting
+        if response.tools_called == [] and user_asked_for_modification and not prior_detections:
+            logging.warning(f"❌ HALLUCINATION GUARD (modification): User requested action but no tools invoked and no prior detections. User msg: '{latest_user_msg}'. LLM response: '{response.response}'")
             return ChatResponse(
                 chat_id=chat_id,
-                response=f"I could not perform the requested image operation. Please try again or rephrase your request.",
+                response=f"I need to analyze the image first. Let me detect what's in it, then I can help you.",
+                prediction_id=_detection_result["prediction_id"],
+                annotated_image=_detection_result["annotated_image"],
+                agent_loop_time_s=response.agent_loop_time_s,
+                iterations=response.iterations,
+                tools_called=[],
+                context_limit_exceeded=False,
+                tokens_used=response.tokens_used,
+            )
+        
+        # Also guard if new image uploaded (forces detection on fresh image)
+        if response.tools_called == [] and new_image_uploaded:
+            logging.warning(f"❌ HALLUCINATION GUARD (new_image): User uploaded new image but LLM didn't analyze it. User msg: '{latest_user_msg}'. LLM response: '{response.response}'")
+            return ChatResponse(
+                chat_id=chat_id,
+                response=f"New image uploaded. Let me analyze it first.",
                 prediction_id=_detection_result["prediction_id"],
                 annotated_image=_detection_result["annotated_image"],
                 agent_loop_time_s=response.agent_loop_time_s,
@@ -1116,7 +853,7 @@ def chat(request: ChatRequest):
         
         # SMART GUARD: Detect only errors if no prior detections and tools not called
         if response.tools_called == [] and user_asked_for_detect and not prior_detections:
-            logging.warning(f"❌ HALLUCINATION GUARD (detect): User requested object detection but no tools invoked and no prior detections. User msg: '{latest_user_msg}'. LLM response: '{response.response}'")
+            logging.warning(f"❌ HALLUCINATION GUARD (detect): User requested detection but no tools invoked and no prior detections. User msg: '{latest_user_msg}'. LLM response: '{response.response}'")
             return ChatResponse(
                 chat_id=chat_id,
                 response=f"I could not detect objects. Please try again or rephrase your request.",
