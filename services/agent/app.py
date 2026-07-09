@@ -276,8 +276,6 @@ def _create_mcp_tool_wrapper(mcp_tool):
         if isinstance(tool_input, dict):
             tool_input['image_b64'] = image_b64
         
-        logging.info(f"🔧 Calling {tool_name} with auto-injected image")
-        
         # Call the original tool's invoke
         try:
             result = original_tool.invoke(tool_input)
@@ -306,7 +304,6 @@ def _create_mcp_tool_wrapper(mcp_tool):
         
         # Update context with result image
         _set_current_image(result_b64)
-        logging.info(f"✅ {tool_name} completed, image updated")
         
         return json.dumps({"success": True, "message": f"Applied {tool_name}"})
     
@@ -341,18 +338,14 @@ def _validate_and_get_detection(object_id: int):
     detections = _current_detections.get()
     chat_id = _current_chat_id.get()
     
-    logging.info(f"🔍 _validate_and_get_detection({object_id}): detections_contextvar={len(detections) if detections else 0}, chat_id={chat_id}")
-    
     # Fallback to persistent state if ContextVar is empty (ContextVar isolation across tool calls)
     if not detections and chat_id and chat_id in _chat_image_state:
         detections = _chat_image_state[chat_id].get("detections", [])
-        logging.info(f"   ↳ Restored {len(detections)} detections from persistent state")
     
     if not image_b64:
         return json.dumps({"error": "No image available. Please detect objects first."})
     
     if not detections:
-        logging.info(f"   ↳ No detections available (none in contextvar, fallback empty/missing)")
         return json.dumps({"error": "No detections available. Please detect objects first."})
     
     if object_id < 0 or object_id >= len(detections):
@@ -568,12 +561,6 @@ def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
         logging.warning(f"⚠️  Failed to preload MCP tools: {e}. Continuing with local tools only.")
 
     for iteration in range(1, max_iterations + 1):
-        # Debug: Show message structure before invoke
-        msg_structure: list[tuple[str, int]] = [(type(msg).__name__, len(str(msg.content)) if hasattr(msg, "content") else 0) for msg in messages]
-        available_tools: list[str] = list(TOOLS.keys())
-        print(f"\n[ITERATION {iteration}] Invoking LLM with {len(messages)} messages: {msg_structure}")
-        print(f"[ITERATION {iteration}] Available tools: {available_tools}\n")
-        
         response: AIMessage = llm_with_tools.invoke(messages)
         
         usage = getattr(response, "usage_metadata", None) or {}
@@ -684,13 +671,11 @@ def chat(request: ChatRequest):
         chat_id = request.chat_id
         latest_image_s3_key = _chat_image_state[chat_id].get("current_s3_key")
         restored_detections = _chat_image_state[chat_id].get("detections", [])
-        logging.info(f"🔄 Restored session {chat_id}: current_s3_key={latest_image_s3_key}, detections={len(restored_detections)}")
     else:
         # New request: generate new chat_id
         chat_id = str(uuid.uuid4())
         latest_image_s3_key = None
         _chat_image_state[chat_id] = {}  # Initialize state for new chat
-        logging.info(f"✨ Created new chat session: {chat_id}")
 
     for msg in request.messages:
         if msg.role == "user":
@@ -705,7 +690,6 @@ def chat(request: ChatRequest):
                         prediction_id=prediction_id,
                         original_filename="original.jpg"
                     )
-                    logging.info(f"Image uploaded to S3: {latest_image_s3_key}")
                     
                     # Store original and current S3 keys in chat state
                     _chat_image_state[chat_id]["original_s3_key"] = latest_image_s3_key
@@ -741,14 +725,13 @@ def chat(request: ChatRequest):
             image_bytes = download_image_from_s3(latest_image_s3_key)
             current_image_b64 = bytes_to_b64(image_bytes)
         except Exception as e:
-            logging.error(f"Failed to restore image from S3: {e}")
-            # Continue without image rather than failing
+            logging.warning(f"Could not restore image from S3: {e}")
 
     _detection_result["prediction_id"] = None
     _detection_result["annotated_image"] = None
-    _detection_result["final_image_b64"] = None  # Phase 5: Store final image after tool modifications
+    _detection_result["final_image_b64"] = None
 
-    # Phase 5: Store initial image for change detection
+    # Store initial image for change detection
     initial_image_b64 = current_image_b64
 
     # Set context variables for the agent
@@ -756,9 +739,9 @@ def chat(request: ChatRequest):
     chat_token = _current_chat_id.set(chat_id)
     pred_token = _current_prediction_id.set(prediction_id)
     image_b64_token = _current_image_b64.set(current_image_b64)  # Set with restored or uploaded image
-    detections_token = _current_detections.set(restored_detections)  # Restore previous detections
+    detections_token = _current_detections.set(restored_detections)
 
-    # Phase 6: Sanitize message history to break pattern-matching
+    # Sanitize message history to break pattern-matching
     # Replace prior assistant messages that confirm image-operation success with neutral summaries
     sanitized_lc_messages = []
     for msg in lc_messages:
@@ -779,7 +762,6 @@ def chat(request: ChatRequest):
             
             if is_success_confirmation:
                 # Replace with neutral summary to avoid pattern-matching
-                logging.info(f"🧹 Sanitizing prior success message (first 80 chars): {content[:80]}")
                 sanitized_lc_messages.append(AIMessage(
                     content="[Previous assistant response summarized: an image operation result was shown to the user.]"
                 ))
@@ -796,8 +778,6 @@ def chat(request: ChatRequest):
         if user_only_messages:
             # Keep only the latest user message (the current input)
             user_only_messages = [user_only_messages[-1]]
-            if new_image_uploaded:
-                logging.info(f"🖼️  New image uploaded: passing only latest message to agent (conversation cleared)")
         
         response = run_agent(user_only_messages)
         response.chat_id = chat_id  # Always return current chat_id
@@ -817,8 +797,6 @@ def chat(request: ChatRequest):
         detect_keywords = {"detect", "find", "identify", "see", "what's", "whats", "analyze"}
         user_asked_for_detect = any(keyword in latest_user_msg for keyword in detect_keywords)
         prior_detections = _current_detections.get() or _chat_image_state.get(chat_id, {}).get("detections", [])
-        
-        logging.info(f"🔍 Hallucination check: tools_called={response.tools_called}, user_msg='{latest_user_msg[:100]}', modification={user_asked_for_modification}, detect={user_asked_for_detect}, prior_detections={len(prior_detections)}")
         
         # STRONG GUARD: Image operations need tools, BUT only if we don't have prior detections
         # If user already detected objects in a prior request, they can do operations without re-detecting
@@ -868,25 +846,17 @@ def chat(request: ChatRequest):
         
         # Persist detections back to chat state after agent completes
         final_detections = _current_detections.get()
-        logging.info(f"🔄 Checking detection persistence: current={len(final_detections)} items, was_restored={len(restored_detections)}")
         if final_detections:  # Only update if detections were set (e.g., by detect_objects)
             _chat_image_state[chat_id]["detections"] = final_detections
-            logging.info(f"✅ Persisted {len(final_detections)} detections to chat state for {chat_id}")
         else:
             # Ensure detections key exists even if empty
             if "detections" not in _chat_image_state[chat_id]:
                 _chat_image_state[chat_id]["detections"] = []
-            logging.info(f"✅ Detections state consistent: {len(_chat_image_state[chat_id]['detections'])} items in state")
         
-        # Phase 5: Persist final working image if it changed during the request
-        # Tools store their final output in _detection_result["final_image_b64"] to bypass ContextVar context isolation
+        # Persist final working image if it changed during the request
         final_image_b64 = _detection_result.get("final_image_b64") or _current_image_b64.get()
-        initial_len = len(initial_image_b64 or '')
-        final_len = len(final_image_b64 or '')
-        logging.info(f"📊 Phase 5 image comparison: initial={initial_len} chars, final={final_len} chars, equal={initial_image_b64 == final_image_b64}")
         if final_image_b64 and final_image_b64 != initial_image_b64:
             try:
-                logging.info(f"🖼️ Image was modified during request: {initial_len} → {final_len} chars")
                 image_bytes = base64.b64decode(final_image_b64)
                 
                 # Generate fresh UUID for modified image upload
@@ -900,12 +870,8 @@ def chat(request: ChatRequest):
                     original_filename="working.jpg"
                 )
                 _chat_image_state[chat_id]["current_s3_key"] = new_s3_key
-                logging.info(f"✅ Persisted modified image to S3: {new_s3_key}")
             except Exception as e:
-                logging.error(f"❌ Failed to persist modified image: {e}", exc_info=True)
-                # Continue without S3 persistence - don't fail the whole request
-        else:
-            logging.info(f"🔵 Image unchanged: no persistence needed (final_image_b64 is None: {final_image_b64 is None})")
+                logging.error(f"Failed to persist modified image to S3: {e}", exc_info=True)
         
         return response
     finally:
