@@ -22,6 +22,7 @@ logging.getLogger("langchain_core").setLevel(logging.DEBUG)
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 from langchain.chat_models import init_chat_model
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -32,6 +33,7 @@ from s3_utils import upload_image_to_s3, download_image_from_s3
 from image_utils import bytes_to_b64
 
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
+MCP_SERVICE_URL = os.environ.get("MCP_SERVICE_URL", "http://localhost:9000/mcp")
 MODEL = os.environ.get("MODEL")
 
 # Text-only models - format: "provider:model_id" or "bedrock:model_id"
@@ -403,7 +405,7 @@ def get_mcp_tools(refresh: bool = True) -> str:
         # Initialize/refresh MCP client connection
         mcp_config = {
             "img-proc": {
-                "url": "http://localhost:9000/mcp",
+                "url": MCP_SERVICE_URL,
                 "transport": "http"
             }
         }
@@ -553,12 +555,6 @@ def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
     tools_called: list[str] = []
     tokens_used = TokensUsed()
-    
-    # PRELOAD MCP TOOLS at the start so they're available for all iterations
-    try:
-        get_mcp_tools.invoke({"refresh": True})
-    except Exception as e:
-        logging.warning(f"⚠️  Failed to preload MCP tools: {e}. Continuing with local tools only.")
 
     for iteration in range(1, max_iterations + 1):
         response: AIMessage = llm_with_tools.invoke(messages)
@@ -648,10 +644,17 @@ def run_agent(history: list, max_iterations: int = 10) -> ChatResponse:
         tokens_used=tokens_used,
     )
 app = FastAPI(title="Vision Agent")
+Instrumentator().instrument(app).expose(app)
+
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=allowed_origins,
     allow_methods=["POST", "GET"],
     allow_headers=["Content-Type"],
 )
