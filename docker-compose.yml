@@ -24,6 +24,7 @@ services:
       YOLO_SERVICE_URL: http://yolo:8080
       MCP_SERVICE_URL: http://img-proc-mcp:9000/mcp
       MODEL: bedrock:amazon.nova-micro-v1:0
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
       AWS_REGION: ${AWS_REGION}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET}
     networks:

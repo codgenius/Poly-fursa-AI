@@ -36,6 +36,16 @@ jobs:
             git checkout dev
             git pull --ff-only origin dev
 
+            # Ensure host-specific configuration in .env
+            touch .env
+            
+            # Set ALLOWED_ORIGINS for dev environment (replace if exists, append if not)
+            if grep -q '^ALLOWED_ORIGINS=' .env; then
+              sed -i 's|^ALLOWED_ORIGINS=.*|ALLOWED_ORIGINS=http://dev.hadi.fursa.click:3000|' .env
+            else
+              echo "ALLOWED_ORIGINS=http://dev.hadi.fursa.click:3000" >> .env
+            fi
+
             # Load environment variables from .env (if exists)
             set -a
             [ -f .env ] && source .env
@@ -62,6 +72,16 @@ jobs:
             git fetch origin
             git checkout main
             git pull --ff-only origin main
+
+            # Ensure host-specific configuration in .env
+            touch .env
+            
+            # Set ALLOWED_ORIGINS for prod environment (replace if exists, append if not)
+            if grep -q '^ALLOWED_ORIGINS=' .env; then
+              sed -i 's|^ALLOWED_ORIGINS=.*|ALLOWED_ORIGINS=http://prod.hadi.fursa.click:3000|' .env
+            else
+              echo "ALLOWED_ORIGINS=http://prod.hadi.fursa.click:3000" >> .env
+            fi
 
             # Load environment variables from .env (if exists)
             set -a
