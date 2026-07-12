@@ -9,7 +9,7 @@ services:
       AWS_REGION: ${AWS_REGION}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET}
     volumes:
-      - yolo-db:/app
+      - yolo-db:/app/data
       - ~/.aws:/root/.aws:ro
     networks:
       - polyai-net
