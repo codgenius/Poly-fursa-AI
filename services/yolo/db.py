@@ -1,28 +1,25 @@
 import os
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 from models import Base
 
 # Database configuration from environment variables
-DB_BACKEND = os.environ.get("DB_BACKEND", "sqlite")
-DB_USER = os.environ.get("DB_USER", "user")
-DB_PASSWORD = os.environ.get("DB_PASSWORD", "pass")
+DB_BACKEND = os.environ.get("DB_BACKEND", "sqlite").lower()
+DB_USER = os.environ.get("DB_USER", "postgres")
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "postgres")
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_PORT = os.environ.get("DB_PORT", "5432")
 DB_NAME = os.environ.get("DB_NAME", "predictions")
 
 # Construct database URL
 if DB_BACKEND == "postgres":
-    DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    DATABASE_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 else:
-    # Default to SQLite - use absolute path to avoid ambiguity
-    db_dir = os.path.dirname(os.path.abspath(__file__))
-    db_path = os.path.join(db_dir, f"{DB_NAME}.db")
-    DATABASE_URL = f"sqlite:///{db_path}"
+    DATABASE_URL = "sqlite:///./predictions.db"
 
 # Create engine with appropriate settings
 if DB_BACKEND == "postgres":
-    engine = create_engine(DATABASE_URL)
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 else:
     # SQLite needs check_same_thread=False for threading
     engine = create_engine(
@@ -35,13 +32,8 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def get_db():
     """FastAPI dependency for getting a database session."""
-    db = SessionLocal()
+    db: Session = SessionLocal()
     try:
         yield db
     finally:
         db.close()
-
-
-def init_db():
-    """Initialize the database by creating all tables."""
-    Base.metadata.create_all(bind=engine)
