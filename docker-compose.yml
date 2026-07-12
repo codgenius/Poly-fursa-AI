@@ -10,6 +10,8 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: ${AWS_REGION}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET}
+    volumes:
+      - yolo-db:/app
     networks:
       - polyai-net
 
@@ -86,12 +88,21 @@ services:
     image: prom/node-exporter:latest
     ports:
       - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
     networks:
       - monitoring-net
 
 volumes:
   grafana-storage:
   prometheus-data:
+  yolo-db:
 
 networks:
   polyai-net:
