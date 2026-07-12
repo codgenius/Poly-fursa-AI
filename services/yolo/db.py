@@ -33,6 +33,11 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
+def init_db():
+    """Create all database tables defined in models.Base."""
+    Base.metadata.create_all(bind=engine)
+
+
 def get_db():
     """FastAPI dependency for getting a database session."""
     db: Session = SessionLocal()
