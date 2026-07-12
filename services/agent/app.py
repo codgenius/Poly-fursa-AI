@@ -652,12 +652,6 @@ allowed_origins = [
     if origin.strip()
 ]
 
-allowed_origins = [
-    origin.strip()
-    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
-    if origin.strip()
-]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
