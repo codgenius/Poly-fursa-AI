@@ -3,6 +3,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from models import Base
 
+# Ensure data directory exists (for SQLite database file)
+os.makedirs("./data", exist_ok=True)
+
 # Database configuration from environment variables
 DB_BACKEND = os.environ.get("DB_BACKEND", "sqlite").lower()
 DB_USER = os.environ.get("DB_USER", "postgres")
@@ -15,7 +18,7 @@ DB_NAME = os.environ.get("DB_NAME", "predictions")
 if DB_BACKEND == "postgres":
     DATABASE_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 else:
-    DATABASE_URL = "sqlite:///./predictions.db"
+    DATABASE_URL = "sqlite:///./data/predictions.db"
 
 # Create engine with appropriate settings
 if DB_BACKEND == "postgres":
