@@ -6,12 +6,11 @@ services:
     ports:
       - "8080:8080"
     environment:
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: ${AWS_REGION}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET}
     volumes:
       - yolo-db:/app
+      - ~/.aws:/root/.aws:ro
     networks:
       - polyai-net
 
@@ -25,8 +24,6 @@ services:
       YOLO_SERVICE_URL: http://yolo:8080
       MCP_SERVICE_URL: http://img-proc-mcp:9000/mcp
       MODEL: bedrock:amazon.nova-micro-v1:0
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: ${AWS_REGION}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET}
     networks:
@@ -34,6 +31,8 @@ services:
     depends_on:
       - yolo
       - img-proc-mcp
+    volumes:
+      - ~/.aws:/root/.aws:ro
 
   img-proc-mcp:
     build:
@@ -43,6 +42,8 @@ services:
       - "9000:9000"
     networks:
       - polyai-net
+    volumes:
+      - ~/.aws:/root/.aws:ro
 
   frontend:
     build:
