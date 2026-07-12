@@ -4,11 +4,11 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the application
 COPY . .
 
-EXPOSE 3001
+EXPOSE 9000
 
 CMD ["python", "app.py"]

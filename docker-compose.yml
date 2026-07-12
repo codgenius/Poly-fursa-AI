@@ -1,30 +1,51 @@
 services:
   yolo:
-    image: hadikhier/yolo-service:0.0.1
+    build:
+      context: ./services/yolo
+    image: hadikhier/yolo-service:${YOLO_IMAGE_TAG:-0.0.1}
     ports:
       - "8080:8080"
     environment:
-      AWS_REGION: us-east-1
-      AWS_S3_BUCKET: hadi-polyai-images-hk2026
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET}
     networks:
       - polyai-net
 
   agent:
-    image: hadikhier/agent-service:0.0.2
+    build:
+      context: ./services/agent
+    image: hadikhier/agent-service:${AGENT_IMAGE_TAG:-0.0.2}
     ports:
       - "8000:8000"
     environment:
       YOLO_SERVICE_URL: http://yolo:8080
+      MCP_SERVICE_URL: http://img-proc-mcp:9000/mcp
       MODEL: bedrock:amazon.nova-micro-v1:0
-      AWS_REGION: us-east-1
-      AWS_S3_BUCKET: hadi-polyai-images-hk2026
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET}
     networks:
       - polyai-net
     depends_on:
       - yolo
+      - img-proc-mcp
+
+  img-proc-mcp:
+    build:
+      context: ./services/img-proc-mcp
+    image: hadikhier/img-proc-mcp:${MCP_IMAGE_TAG:-0.0.1}
+    ports:
+      - "9000:9000"
+    networks:
+      - polyai-net
 
   frontend:
-    image: hadikhier/frontend-service:0.0.1
+    build:
+      context: ./services/frontend
+    image: hadikhier/frontend-service:${FRONTEND_IMAGE_TAG:-0.0.1}
     ports:
       - "3000:3000"
     environment:
@@ -50,13 +71,23 @@ services:
   grafana:
     image: grafana/grafana
     ports:
-      - "3001:3000"
+      - "3001:3001"
+    environment:
+      GF_SERVER_HTTP_PORT: 3001
+      GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
       - grafana-storage:/var/lib/grafana
     networks:
       - monitoring-net
     depends_on:
       - prometheus
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    ports:
+      - "9100:9100"
+    networks:
+      - monitoring-net
 
 volumes:
   grafana-storage:

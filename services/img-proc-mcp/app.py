@@ -258,4 +258,4 @@ def paste_region(full_image_b64: str, region_b64: str, left: int, top: int, righ
 
 
 if __name__ == "__main__":
-    mcp.run(transport="http", port=9000)
+    mcp.run(transport="http", host="0.0.0.0", port=9000)
