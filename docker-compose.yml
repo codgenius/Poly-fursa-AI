@@ -101,6 +101,8 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
       - grafana-storage:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
     networks:
       - monitoring-net
     depends_on:
