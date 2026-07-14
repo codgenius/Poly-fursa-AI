@@ -1,5 +1,7 @@
 .venv
-.vscode
+.vscode/*
+!.vscode/settings.json
+!.vscode/mcp.json
 .idea
 .env
 .env.local
@@ -15,7 +17,6 @@
 uploads/
 
 .idea
-.vscode
 
 __pycache__
 *.pycwip
@@ -46,4 +47,3 @@ Thumbs.db
 services/frontend/.next/
 services/frontend/node_modules/
 services/frontend/out/
-

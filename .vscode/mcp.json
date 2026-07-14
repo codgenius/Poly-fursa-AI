@@ -1,0 +1,18 @@
+{
+  "servers": {
+    "observability": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["services/observability-mcp/app.py"],
+      "env": {
+        "DEV_PROMETHEUS_URL": "http://dev.hadi.fursa.click:9090",
+        "PROD_PROMETHEUS_URL": "http://prod.hadi.fursa.click:9090",
+        "DEV_S3_LOGS_BUCKET": "hadi-dev-logs-bucket",
+        "PROD_S3_LOGS_BUCKET": "REPLACE_WITH_PROD_LOGS_BUCKET",
+        "DEV_LOG_HOST": "polyai-dev",
+        "PROD_LOG_HOST": "polyai-prod",
+        "AWS_REGION": "us-east-1"
+      }
+    }
+  }
+}
