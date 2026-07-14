@@ -11,6 +11,10 @@ services:
     volumes:
       - yolo-db:/app/data
       - ~/.aws:/root/.aws:ro
+    logging:
+      driver: json-file
+      options:
+        labels: "com.docker.compose.service"
     networks:
       - polyai-net
 
@@ -34,6 +38,10 @@ services:
       - img-proc-mcp
     volumes:
       - ~/.aws:/root/.aws:ro
+    logging:
+      driver: json-file
+      options:
+        labels: "com.docker.compose.service"
 
   img-proc-mcp:
     build:
@@ -45,6 +53,10 @@ services:
       - polyai-net
     volumes:
       - ~/.aws:/root/.aws:ro
+    logging:
+      driver: json-file
+      options:
+        labels: "com.docker.compose.service"
 
   frontend:
     build:
@@ -58,6 +70,10 @@ services:
       - polyai-net
     depends_on:
       - agent
+    logging:
+      driver: json-file
+      options:
+        labels: "com.docker.compose.service"
 
   prometheus:
     image: prom/prometheus
@@ -71,6 +87,10 @@ services:
       - polyai-net
     depends_on:
       - yolo
+    logging:
+      driver: json-file
+      options:
+        labels: "com.docker.compose.service"
 
   grafana:
     image: grafana/grafana
@@ -85,6 +105,10 @@ services:
       - monitoring-net
     depends_on:
       - prometheus
+    logging:
+      driver: json-file
+      options:
+        labels: "com.docker.compose.service"
 
   node-exporter:
     image: prom/node-exporter:latest
@@ -100,17 +124,26 @@ services:
       - '--path.rootfs=/rootfs'
     networks:
       - monitoring-net
+    logging:
+      driver: json-file
+      options:
+        labels: "com.docker.compose.service"
+
   fluent-bit:
     image: fluent/fluent-bit:4.2.7
     restart: unless-stopped
     environment:
       AWS_REGION: ${AWS_REGION}
       S3_LOGS_BUCKET: ${S3_LOGS_BUCKET}
-      HOSTNAME: ${HOSTNAME:-polyai-dev}
+      HOSTNAME: ${LOG_HOST:-polyai-dev}
     volumes:
       - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/log:/var/log
+    logging:
+      driver: json-file
+      options:
+        labels: "com.docker.compose.service"
 
 volumes:
   grafana-storage:
