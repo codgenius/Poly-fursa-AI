@@ -32,6 +32,7 @@ jobs:
           username: ubuntu
           key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
           script: |
+            set -e
             cd /home/ubuntu/Poly-fursa-AI
             git fetch origin
             git checkout dev
@@ -78,6 +79,7 @@ jobs:
           username: ubuntu
           key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
           script: |
+            set -e
             cd /home/ubuntu/Poly-fursa-AI
             git fetch origin
             git checkout main
