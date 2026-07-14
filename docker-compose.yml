@@ -100,6 +100,17 @@ services:
       - '--path.rootfs=/rootfs'
     networks:
       - monitoring-net
+  fluent-bit:
+    image: fluent/fluent-bit:4.2.7
+    restart: unless-stopped
+    environment:
+      AWS_REGION: ${AWS_REGION}
+      S3_LOGS_BUCKET: ${S3_LOGS_BUCKET}
+      HOSTNAME: ${HOSTNAME:-polyai-dev}
+    volumes:
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/log:/var/log
 
 volumes:
   grafana-storage:
