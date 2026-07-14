@@ -7,6 +7,7 @@ on:
       - dev
     paths:
       - 'docker-compose.yml'
+      - 'fluent-bit.conf'
       - 'monitoring/**'
       - '.env.example'
       - '.github/workflows/deploy-infrastructure.yml'
@@ -46,6 +47,12 @@ jobs:
               echo "ALLOWED_ORIGINS=http://dev.hadi.fursa.click:3000" >> .env
             fi
 
+            if grep -q '^LOG_HOST=' .env; then
+              sed -i 's|^LOG_HOST=.*|LOG_HOST=polyai-dev|' .env
+            else
+              echo "LOG_HOST=polyai-dev" >> .env
+            fi
+
             # Load environment variables from .env (if exists)
             set -a
             [ -f .env ] && source .env
@@ -56,6 +63,9 @@ jobs:
 
             # Bring up entire stack
             docker compose up -d
+
+            # Reload the bind-mounted Fluent Bit configuration on every infrastructure deploy
+            docker compose up -d --force-recreate --no-deps fluent-bit
 
             # Show status
             docker compose ps
@@ -83,6 +93,12 @@ jobs:
               echo "ALLOWED_ORIGINS=http://prod.hadi.fursa.click:3000" >> .env
             fi
 
+            if grep -q '^LOG_HOST=' .env; then
+              sed -i 's|^LOG_HOST=.*|LOG_HOST=polyai-prod|' .env
+            else
+              echo "LOG_HOST=polyai-prod" >> .env
+            fi
+
             # Load environment variables from .env (if exists)
             set -a
             [ -f .env ] && source .env
@@ -93,6 +109,9 @@ jobs:
 
             # Bring up entire stack
             docker compose up -d
+
+            # Reload the bind-mounted Fluent Bit configuration on every infrastructure deploy
+            docker compose up -d --force-recreate --no-deps fluent-bit
 
             # Show status
             docker compose ps
