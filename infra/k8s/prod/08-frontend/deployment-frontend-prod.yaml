@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: hadikhier/frontend-service:0.0.1
+        ports:
+        - containerPort: 3000
+        env:
+        - name: NEXT_PUBLIC_AGENT_URL
+          value: "http://agent:8000"
