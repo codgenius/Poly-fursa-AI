@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: img-proc-mcp
+  namespace: prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: img-proc-mcp
+  template:
+    metadata:
+      labels:
+        app: img-proc-mcp
+    spec:
+      containers:
+      - name: img-proc-mcp
+        image: hadikhier/img-proc-mcp:0.0.1
+        ports:
+        - containerPort: 9000
