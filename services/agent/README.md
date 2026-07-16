@@ -98,3 +98,4 @@ Response:
 ### `GET /health`
 
 Returns `{"status": "ok"}` when the service is running.
+
