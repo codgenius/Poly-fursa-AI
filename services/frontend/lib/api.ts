@@ -4,6 +4,7 @@ const AGENT_URL = process.env.NEXT_PUBLIC_AGENT_URL ?? "http://localhost:8000";
 
 export interface ChatResponse {
   response: string;
+  chat_id?: string;
   prediction_id?: string | null;
   annotated_image?: string | null;
   agent_loop_time_s?: number;
@@ -12,11 +13,11 @@ export interface ChatResponse {
   context_limit_exceeded?: boolean;
 }
 
-export async function sendMessage(messages: ChatMessage[]): Promise<ChatResponse> {
+export async function sendMessage(messages: ChatMessage[], chatId?: string): Promise<ChatResponse> {
   const res = await fetch(`${AGENT_URL}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ messages, chat_id: chatId || null }),
   });
 
   if (!res.ok) {

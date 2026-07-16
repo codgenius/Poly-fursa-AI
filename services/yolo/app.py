@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Depends
 from fastapi.responses import FileResponse, Response
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -48,7 +49,15 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 import torch
 torch.cuda.is_available = lambda: False
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    """Initialize database tables on application startup."""
+    init_db()
+    logging.info("Database initialized - tables created")
+    yield
+    logging.info("Application shutting down")
+
+app = FastAPI(lifespan=lifespan)
 
 # Expose /metrics endpoint with default process metrics + FastAPI HTTP metrics
 Instrumentator().instrument(app).expose(app)
@@ -314,8 +323,5 @@ def hello():
 
 if __name__ == "__main__":
     import uvicorn
-
-    init_db()
-    
     uvicorn.run(app, host="0.0.0.0", port=8080)
 
