@@ -9,11 +9,20 @@ langchain[openai]
 langchain[anthropic]
 langchain[google-genai]
 
+# MCP client
+langchain-mcp-adapters
+
 httpx
 pydantic
 
+# Image processing
+Pillow>=10.0.0
+
 # AWS
 boto3>=1.26.0
+
+# Metrics
+prometheus-fastapi-instrumentator>=6.0.0
 
 # Testing
 pytest

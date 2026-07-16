@@ -64,6 +64,24 @@ def client():
 
 
 @pytest.fixture
+def load_app():
+    """Load and return the app module with mocks in place."""
+    # Mock init_chat_model before importing app
+    with patch("langchain.chat_models.init_chat_model") as mock_init:
+        mock_llm = MagicMock()
+        mock_llm.profile = {
+            "tool_calling": True,
+            "max_input_tokens": 200000,
+        }
+        mock_bound_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_bound_llm
+        mock_init.return_value = mock_llm
+        
+        import app
+        return app
+
+
+@pytest.fixture
 def mock_ai_response_no_tools():
     """Mock AIMessage response with no tool calls (final response)."""
     from langchain_core.messages import AIMessage
