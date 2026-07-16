@@ -929,6 +929,14 @@ def chat(request: ChatRequest):
 def health():
     return {"status": "ok"}
 
+@app.get("/ready")
+def ready():
+    """
+    Readiness check endpoint.
+    Returns 200 if service is ready to accept traffic.
+    """
+    return {"status": "ready"}
+
 
 if __name__ == "__main__":
     import uvicorn
