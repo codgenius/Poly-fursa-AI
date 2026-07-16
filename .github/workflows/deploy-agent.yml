@@ -1,17 +1,7 @@
 name: Deploy Agent Service
 
 on:
-  push:
-    branches:
-      - main
-      - dev
-    paths:
-      - 'services/agent/**'
-      - '.github/workflows/deploy-agent.yml'
-
-concurrency:
-  group: polyai-deploy-${{ github.ref_name }}
-  cancel-in-progress: false
+  workflow_call:
 
 jobs:
   build-and-deploy:

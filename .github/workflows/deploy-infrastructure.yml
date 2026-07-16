@@ -1,19 +1,7 @@
 name: Deploy Infrastructure
 
 on:
-  push:
-    branches:
-      - main
-      - dev
-    paths:
-      - 'docker-compose.yml'
-      - 'monitoring/**'
-      - '.env.example'
-      - '.github/workflows/deploy-infrastructure.yml'
-
-concurrency:
-  group: polyai-deploy-${{ github.ref_name }}
-  cancel-in-progress: false
+  workflow_call:
 
 jobs:
   deploy-infrastructure:
