@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
       - name: agent
-        image: hadikhier/agent-service:0.0.2
+        image: hadikhier/agent-service:0.0.3
         ports:
         - containerPort: 8000
         env:
