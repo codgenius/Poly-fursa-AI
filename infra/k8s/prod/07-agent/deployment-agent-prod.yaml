@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  namespace: prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent
+  template:
+    metadata:
+      labels:
+        app: agent
+    spec:
+      containers:
+      - name: agent
+        image: hadikhier/agent-service:0.0.3
+        ports:
+        - containerPort: 8000
+        env:
+        - name: YOLO_SERVICE_URL
+          value: "http://yolo:8080"
+        - name: MCP_SERVICE_URL
+          value: "http://img-proc-mcp:9000/mcp"
+        - name: MODEL
+          value: "bedrock:amazon.nova-micro-v1:0"
+        - name: ALLOWED_ORIGINS
+          value: "http://localhost:3000"
+        - name: AWS_REGION
+          value: "us-east-1"
+        - name: AWS_S3_BUCKET
+          value: "hadi-polyai-images-hk2026"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 20
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 1
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "2Gi"
