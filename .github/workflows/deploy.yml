@@ -1,0 +1,117 @@
+name: Deploy Changed Services
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+
+concurrency:
+  group: polyai-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      infrastructure: ${{ steps.filter.outputs.infrastructure }}
+      mcp: ${{ steps.filter.outputs.mcp }}
+      yolo: ${{ steps.filter.outputs.yolo }}
+      agent: ${{ steps.filter.outputs.agent }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect changed deployment areas
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          base: ${{ github.ref }}
+          filters: |
+            infrastructure:
+              - 'docker-compose.yml'
+              - 'fluent-bit.conf'
+              - 'monitoring/**'
+              - 'infra/**'
+              - '.env.example'
+              - '.github/workflows/deploy-infrastructure.yml'
+            mcp:
+              - 'services/img-proc-mcp/**'
+              - '.github/workflows/deploy-mcp.yml'
+            yolo:
+              - 'services/yolo/**'
+              - '.github/workflows/deploy-yolo.yml'
+            agent:
+              - 'services/agent/**'
+              - '.github/workflows/deploy-agent.yml'
+            frontend:
+              - 'services/frontend/**'
+              - '.github/workflows/deploy-frontend.yml'
+
+  deploy-infrastructure:
+    needs: changes
+    if: needs.changes.outputs.infrastructure == 'true'
+    uses: ./.github/workflows/deploy-infrastructure.yml
+    secrets: inherit
+
+  deploy-mcp:
+    needs:
+      - changes
+      - deploy-infrastructure
+    if: |
+      always() &&
+      needs.changes.result == 'success' &&
+      needs.changes.outputs.mcp == 'true' &&
+      (needs.deploy-infrastructure.result == 'success' || needs.deploy-infrastructure.result == 'skipped')
+    uses: ./.github/workflows/deploy-mcp.yml
+    secrets: inherit
+
+  deploy-yolo:
+    needs:
+      - changes
+      - deploy-infrastructure
+      - deploy-mcp
+    if: |
+      always() &&
+      needs.changes.result == 'success' &&
+      needs.changes.outputs.yolo == 'true' &&
+      (needs.deploy-infrastructure.result == 'success' || needs.deploy-infrastructure.result == 'skipped') &&
+      (needs.deploy-mcp.result == 'success' || needs.deploy-mcp.result == 'skipped')
+    uses: ./.github/workflows/deploy-yolo.yml
+    secrets: inherit
+
+  deploy-agent:
+    needs:
+      - changes
+      - deploy-infrastructure
+      - deploy-mcp
+      - deploy-yolo
+    if: |
+      always() &&
+      needs.changes.result == 'success' &&
+      needs.changes.outputs.agent == 'true' &&
+      (needs.deploy-infrastructure.result == 'success' || needs.deploy-infrastructure.result == 'skipped') &&
+      (needs.deploy-mcp.result == 'success' || needs.deploy-mcp.result == 'skipped') &&
+      (needs.deploy-yolo.result == 'success' || needs.deploy-yolo.result == 'skipped')
+    uses: ./.github/workflows/deploy-agent.yml
+    secrets: inherit
+
+  deploy-frontend:
+    needs:
+      - changes
+      - deploy-infrastructure
+      - deploy-mcp
+      - deploy-yolo
+      - deploy-agent
+    if: |
+      always() &&
+      needs.changes.result == 'success' &&
+      needs.changes.outputs.frontend == 'true' &&
+      (needs.deploy-infrastructure.result == 'success' || needs.deploy-infrastructure.result == 'skipped') &&
+      (needs.deploy-mcp.result == 'success' || needs.deploy-mcp.result == 'skipped') &&
+      (needs.deploy-yolo.result == 'success' || needs.deploy-yolo.result == 'skipped') &&
+      (needs.deploy-agent.result == 'success' || needs.deploy-agent.result == 'skipped')
+    uses: ./.github/workflows/deploy-frontend.yml
+    secrets: inherit
