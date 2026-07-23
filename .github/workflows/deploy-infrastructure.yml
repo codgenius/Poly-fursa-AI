@@ -1,19 +1,7 @@
 name: Deploy Infrastructure
 
 on:
-  push:
-    branches:
-      - main
-      - dev
-    paths:
-      - 'docker-compose.yml'
-      - 'monitoring/**'
-      - '.env.example'
-      - '.github/workflows/deploy-infrastructure.yml'
-
-concurrency:
-  group: polyai-deploy-${{ github.ref_name }}
-  cancel-in-progress: false
+  workflow_call:
 
 jobs:
   deploy-infrastructure:
@@ -31,6 +19,7 @@ jobs:
           username: ubuntu
           key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
           script: |
+            set -e
             cd /home/ubuntu/Poly-fursa-AI
             git fetch origin
             git checkout dev
@@ -46,6 +35,12 @@ jobs:
               echo "ALLOWED_ORIGINS=http://dev.hadi.fursa.click:3000" >> .env
             fi
 
+            if grep -q '^LOG_HOST=' .env; then
+              sed -i 's|^LOG_HOST=.*|LOG_HOST=polyai-dev|' .env
+            else
+              echo "LOG_HOST=polyai-dev" >> .env
+            fi
+
             # Load environment variables from .env (if exists)
             set -a
             [ -f .env ] && source .env
@@ -56,6 +51,9 @@ jobs:
 
             # Bring up entire stack
             docker compose up -d
+
+            # Reload the bind-mounted Fluent Bit configuration on every infrastructure deploy
+            docker compose up -d --force-recreate --no-deps fluent-bit
 
             # Show status
             docker compose ps
@@ -68,6 +66,7 @@ jobs:
           username: ubuntu
           key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
           script: |
+            set -e
             cd /home/ubuntu/Poly-fursa-AI
             git fetch origin
             git checkout main
@@ -83,6 +82,12 @@ jobs:
               echo "ALLOWED_ORIGINS=http://prod.hadi.fursa.click:3000" >> .env
             fi
 
+            if grep -q '^LOG_HOST=' .env; then
+              sed -i 's|^LOG_HOST=.*|LOG_HOST=polyai-prod|' .env
+            else
+              echo "LOG_HOST=polyai-prod" >> .env
+            fi
+
             # Load environment variables from .env (if exists)
             set -a
             [ -f .env ] && source .env
@@ -93,6 +98,9 @@ jobs:
 
             # Bring up entire stack
             docker compose up -d
+
+            # Reload the bind-mounted Fluent Bit configuration on every infrastructure deploy
+            docker compose up -d --force-recreate --no-deps fluent-bit
 
             # Show status
             docker compose ps
