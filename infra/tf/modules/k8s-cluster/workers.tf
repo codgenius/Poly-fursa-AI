@@ -73,6 +73,8 @@ resource "aws_launch_template" "worker" {
     aws_iam_role_policy.worker_application_access,
     aws_iam_role_policy.worker_ssm_join,
     aws_iam_role_policy_attachment.worker_ebs_csi,
+    aws_iam_role_policy_attachment.worker_ecr_read,
+    aws_iam_role_policy_attachment.worker_eks,
     aws_iam_role_policy_attachment.worker_ssm,
   ]
 }

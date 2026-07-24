@@ -132,6 +132,21 @@ resource "aws_iam_role_policy_attachment" "control_plane_ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
+resource "aws_iam_role_policy_attachment" "control_plane_eks_cluster" {
+  role       = aws_iam_role.control_plane.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "control_plane_ebs_csi" {
+  role       = aws_iam_role.control_plane.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "control_plane_ecr_read" {
+  role       = aws_iam_role.control_plane.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
 resource "aws_iam_instance_profile" "control_plane" {
   name = "${var.project_name}-${terraform.workspace}-control-plane"
   role = aws_iam_role.control_plane.name
@@ -147,9 +162,19 @@ resource "aws_iam_role_policy_attachment" "worker_ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
+resource "aws_iam_role_policy_attachment" "worker_eks" {
+  role       = aws_iam_role.worker.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+}
+
 resource "aws_iam_role_policy_attachment" "worker_ebs_csi" {
   role       = aws_iam_role.worker.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "worker_ecr_read" {
+  role       = aws_iam_role.worker.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
 resource "aws_iam_role_policy" "worker_application_access" {

@@ -137,6 +137,9 @@ set -euo pipefail
 
 export KUBECONFIG=/etc/kubernetes/admin.conf
 
+marker_directory=/var/lib/kubernetes-stale-worker-cleanup
+mkdir -p "$marker_directory"
+
 kubectl get nodes \
   --selector='!node-role.kubernetes.io/control-plane' \
   --output=jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{end}{"\n"}{end}' |
@@ -145,14 +148,29 @@ while read -r node_name internal_ip; do
     continue
   fi
 
-  instance_state="$(aws ec2 describe-instances \
+  instance_states="$(aws ec2 describe-instances \
     --region "${aws_region}" \
     --filters "Name=private-ip-address,Values=$internal_ip" \
     --query 'Reservations[].Instances[].State.Name' \
     --output text)"
 
-  if [ "$instance_state" = "terminated" ]; then
+  marker_path="$marker_directory/$node_name"
+
+  # Any active matching EC2 state cancels a pending cleanup. A failed AWS CLI
+  # request exits the script and therefore cannot delete a Kubernetes Node.
+  if printf '%s\n' "$instance_states" |
+    grep -Eq '(^|[[:space:]])(pending|running|stopping|stopped)([[:space:]]|$)'; then
+    rm -f "$marker_path"
+    continue
+  fi
+
+  # AWS may report terminated or eventually return no matching instance. Mark
+  # the first observation and require the next timer run to confirm it.
+  if [ -f "$marker_path" ]; then
     kubectl delete node "$node_name"
+    rm -f "$marker_path"
+  else
+    touch "$marker_path"
   fi
 done
 EOF
@@ -176,7 +194,7 @@ Description=Check for terminated Kubernetes workers
 
 [Timer]
 OnBootSec=10min
-OnUnitActiveSec=6h
+OnUnitActiveSec=10min
 Persistent=true
 Unit=kubernetes-stale-worker-cleanup.service
 

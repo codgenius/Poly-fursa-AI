@@ -84,6 +84,9 @@ resource "aws_instance" "control_plane" {
   depends_on = [
     aws_iam_role_policy.control_plane_ssm_publish,
     aws_iam_role_policy.control_plane_worker_lookup,
+    aws_iam_role_policy_attachment.control_plane_ebs_csi,
+    aws_iam_role_policy_attachment.control_plane_ecr_read,
+    aws_iam_role_policy_attachment.control_plane_eks_cluster,
     aws_iam_role_policy_attachment.control_plane_ssm,
   ]
 }
