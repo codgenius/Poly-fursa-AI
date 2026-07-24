@@ -535,12 +535,14 @@ The Task 6 IAM design should preserve these required Bedrock permissions for wor
 
 - Phase 0 — Requirements and tutorial intake: **complete**.
 - Phase 1 — Terraform skeleton and regional VPC: **complete, validated, and committed** in `ea4bf2c`.
-- Phase 2 — Cluster AWS resources: **implemented, validated, and committed** across `ea4bf2c` and `c791774`; the missing assignment-required managed-policy attachments found during Phase 5 review were implemented on 2026-07-24 and await validation.
+- Phase 2 — Cluster AWS resources: **complete, validated, and committed**. The assignment-required managed-policy correction found during Phase 5 was validated and committed.
 - Phase 3 — Control-plane bootstrap: **complete, validated, and committed** in `ea4bf2c`.
-- Phase 4 — Worker automatic join: **implemented, validated, and committed** in `c791774`. The separately approved cleanup is committed in `8ac44e6`; its Phase 5 reliability correction was implemented on 2026-07-24 and awaits validation.
-- Phase 5 — Terraform validation and reviewed plan: **in progress**. AWS identity, region, backend bucket, backend initialization, and the selected `us-east-1` workspace are confirmed. Pre-plan IAM and stale-cleanup corrections are implemented and await formatting/validation; the first saved Terraform plan has not been created or reviewed.
-- Phases 6–14: **not approved and not started**.
-- Provisioning status: no `terraform apply` has run and no cluster resources have been provisioned.
+- Phase 4 — Worker automatic join: **complete, validated, and committed**. The separately approved cleanup and its Phase 5 reliability correction are also validated and committed.
+- Phase 5 — Terraform validation and reviewed plan: **complete**. The initial saved plan proposed 31 additions, 0 changes, and 0 destroys; its action list contained only the expected new Task 6 networking, IAM, security, control-plane, Launch Template, and ASG resources.
+- Phase 6 — First approved provisioning: **complete and verified**. The initial plan was applied successfully. A follow-up correction added the existing development and production log-bucket permissions and changed only human-readable AWS `Name` tags. Its reviewed plan contained 0 additions, 13 in-place changes, and 0 destroys. A final plan reports no changes.
+- Phase 7 — Manual Task 6 Part II: **approved and in progress**.
+- Phases 8–14: **not approved and not started**.
+- Provisioning status: the Task 6 VPC, control plane, worker Launch Template, and worker ASG are running in `us-east-1`. The control plane initialized successfully, one worker joined automatically, both systemd timers are present, and the expected pre-CNI node state was verified.
 
 The student approved `ssh_ingress_cidr = "0.0.0.0/0"` as a temporary,
 course-compatible rule so GitHub-hosted runners can reach SSH. This exposes
@@ -627,7 +629,7 @@ Validation is static only. Do not provision.
 
 ### Phase 2 — Cluster AWS resources
 
-Status: **implemented and committed — Phase 5 IAM correction pending**
+Status: **complete — validated and committed**
 
 - Create IAM roles and instance profiles.
 - Create security groups.
@@ -652,7 +654,7 @@ Status: **complete — validated and committed**
 
 ### Phase 4 — Worker automatic join
 
-Status: **implemented and committed — Phase 5 cleanup correction pending**
+Status: **complete — validated and committed**
 
 - Implement the approved join mechanism.
 - Add scoped IAM.
@@ -667,7 +669,7 @@ control-plane check, not an ASG lifecycle hook.
 
 ### Phase 5 — Terraform validation and reviewed plan
 
-Status: **in progress — plan creation/review not yet approved**
+Status: **complete — reviewed additions-only plan saved**
 
 - Student runs formatting and validation commands.
 - Correct assignment-required IAM attachment gaps found during pre-plan review.
@@ -677,24 +679,47 @@ Status: **in progress — plan creation/review not yet approved**
 
 ### Phase 6 — First approved provisioning
 
-Status: **not approved**
+Status: **complete — applied and verified**
 
-- Apply only the reviewed plan.
-- Verify cloud-init and kubeadm.
-- Verify the control plane and worker join.
+- [x] Apply only the reviewed additions-only plan.
+- [x] Verify the VPC, two public subnets, public route table, Internet Gateway,
+      cluster security group, and two-AZ worker ASG configuration.
+- [x] Verify cloud-init and kubeadm.
+- [x] Verify the control plane and automatic worker join.
+- [x] Verify the join-command publisher and stale-worker cleanup timers.
+- [x] Add the existing development and production log buckets to the worker
+      application-access policy without making Terraform manage the buckets.
+- [x] Separate human-readable AWS `Name` tags (`hadi-polyai`) from stable
+      Terraform-managed resource identities (`polyai`).
+- [x] Review and apply the correction plan: 0 additions, 13 in-place changes,
+      and 0 destroys.
+- [x] Confirm a final Terraform plan reports no changes.
+
+The existing worker can retain its original display tag until it is replaced
+or scaled because Launch Template tag changes apply to newly launched
+instances. This does not affect cluster behavior or Terraform convergence.
 
 ### Phase 7 — Manual Task 6 Part II
 
-Status: **not approved**
+Status: **approved — cluster add-ons verified; Applications pending Phases 8–9**
 
-- Manually install Calico.
-- Manually install ArgoCD.
-- Manually install the EBS CSI driver and required Prometheus storage.
-- Retrieve the initial password.
-- Manually create Applications.
-- Verify dev automatic sync and prod manual sync.
+- [x] Manually install Calico.
+- [x] Verify both nodes are `Ready`, both Calico node pods are running, and
+      CoreDNS is running.
+- [x] Manually install ArgoCD.
+- [x] Retrieve the initial password and verify UI login through an SSH tunnel.
+- [x] Install the EBS CSI driver from the course tutorial and verify its
+      controller and node pods. This completed a Phase 8 storage prerequisite
+      early; dynamic provisioning has not yet been tested.
+- [ ] Manually create Applications after the Phase 8 manifest compatibility
+      work and Phase 9 declarative Application definitions are ready.
+- [ ] Verify dev automatic sync and prod manual sync.
 
-This phase must succeed before automating bootstrap.
+Calico, ArgoCD, and the EBS CSI driver were installed manually in the running
+cluster through `kubectl` on the control-plane node. These are Kubernetes
+resources stored in the cluster, not Terraform-managed resources or host-level
+package installations. Part III will automate the same cluster bootstrap after
+the manual procedure is fully proven.
 
 ### Phase 8 — Manifest compatibility fixes
 
@@ -706,10 +731,13 @@ Status: **not approved**
 - Replace hardcoded EBS/AZ assumptions.
 - Replace static Prometheus PVs and hardcoded EBS IDs with the approved
   dynamic-provisioning design: EBS CSI driver, `ebs-sc`, and Prometheus PVC.
-- Do not add durable YOLO storage unless a later requirement explicitly asks
-  for it.
+- Keep YOLO storage ephemeral with `emptyDir`; do not add durable YOLO storage.
+  Remove the unused YOLO PVC manifests so ArgoCD does not create misleading
+  unbound claims.
+- Preserve the existing dev and prod HPAs for all three scalable services:
+  YOLO, agent, and frontend (`minReplicas = 1`, `maxReplicas = 3`).
 - Handle secrets safely.
-- Resolve Node Exporter scope.
+- Keep Node Exporter deferred because Task 6 does not require it.
 
 ### Phase 9 — ArgoCD Application files
 
