@@ -57,3 +57,13 @@ output "join_command_parameter_name" {
   description = "SSM parameter containing the current kubeadm worker join command."
   value       = local.join_command_parameter_name
 }
+
+output "worker_launch_template_id" {
+  description = "ID of the worker EC2 Launch Template."
+  value       = aws_launch_template.worker.id
+}
+
+output "worker_autoscaling_group_name" {
+  description = "Name of the worker Auto Scaling Group."
+  value       = aws_autoscaling_group.worker.name
+}
