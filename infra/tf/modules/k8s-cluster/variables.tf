@@ -3,6 +3,11 @@ variable "project_name" {
   type        = string
 }
 
+variable "display_name_prefix" {
+  description = "Prefix used only for human-readable AWS Name tags."
+  type        = string
+}
+
 variable "aws_region" {
   description = "AWS region in which to create the cluster."
   type        = string
@@ -70,6 +75,16 @@ variable "worker_desired_capacity" {
 
 variable "image_bucket_name" {
   description = "Name of the existing S3 bucket used for application images."
+  type        = string
+}
+
+variable "dev_logs_bucket_name" {
+  description = "Name of the existing S3 bucket used for development logs."
+  type        = string
+}
+
+variable "prod_logs_bucket_name" {
+  description = "Name of the existing S3 bucket used for production logs."
   type        = string
 }
 

@@ -1,7 +1,8 @@
 aws_region = "us-east-1"
 
-project_name = "polyai"
-vpc_cidr     = "10.0.0.0/16"
+project_name        = "polyai"
+display_name_prefix = "hadi-polyai"
+vpc_cidr            = "10.0.0.0/16"
 
 availability_zones = [
   "us-east-1a",
@@ -25,7 +26,9 @@ worker_min_size         = 1
 worker_max_size         = 3
 worker_desired_capacity = 1
 
-image_bucket_name = "hadi-polyai-images-hk2026"
+image_bucket_name     = "hadi-polyai-images-hk2026"
+dev_logs_bucket_name  = "hadi-dev-logs-bucket"
+prod_logs_bucket_name = "hadi-prod-bucket-logs"
 
 bedrock_model_arns = [
   "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-haiku-20240307-v1:0",

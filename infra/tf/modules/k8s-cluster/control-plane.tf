@@ -77,7 +77,7 @@ resource "aws_instance" "control_plane" {
   }
 
   tags = {
-    Name = "${var.project_name}-${terraform.workspace}-control-plane"
+    Name = "${var.display_name_prefix}-${terraform.workspace}-control-plane"
     Role = "control-plane"
   }
 

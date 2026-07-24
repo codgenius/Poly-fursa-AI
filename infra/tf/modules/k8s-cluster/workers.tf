@@ -56,7 +56,7 @@ resource "aws_launch_template" "worker" {
     resource_type = "instance"
 
     tags = {
-      Name = "${var.project_name}-${terraform.workspace}-worker"
+      Name = "${var.display_name_prefix}-${terraform.workspace}-worker"
       Role = "worker"
     }
   }
@@ -65,7 +65,7 @@ resource "aws_launch_template" "worker" {
     resource_type = "volume"
 
     tags = {
-      Name = "${var.project_name}-${terraform.workspace}-worker"
+      Name = "${var.display_name_prefix}-${terraform.workspace}-worker"
     }
   }
 
@@ -96,7 +96,7 @@ resource "aws_autoscaling_group" "worker" {
 
   tag {
     key                 = "Name"
-    value               = "${var.project_name}-${terraform.workspace}-worker"
+    value               = "${var.display_name_prefix}-${terraform.workspace}-worker"
     propagate_at_launch = true
   }
 

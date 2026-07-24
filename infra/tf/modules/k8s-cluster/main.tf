@@ -27,7 +27,7 @@ module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.8.1"
 
-  name = "${var.project_name}-${terraform.workspace}-vpc"
+  name = "${var.display_name_prefix}-${terraform.workspace}-vpc"
   cidr = var.vpc_cidr
 
   azs            = var.availability_zones
@@ -43,7 +43,7 @@ module "vpc" {
   }
 
   tags = {
-    Name = "${var.project_name}-${terraform.workspace}-vpc"
+    Name = "${var.display_name_prefix}-${terraform.workspace}-vpc"
   }
 }
 
@@ -75,6 +75,42 @@ data "aws_iam_policy_document" "worker_application_access" {
       "s3:PutObject",
     ]
     resources = ["arn:aws:s3:::${var.image_bucket_name}/*"]
+  }
+
+  statement {
+    sid       = "ListDevelopmentLogsBucket"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::${var.dev_logs_bucket_name}"]
+  }
+
+  statement {
+    sid    = "UseDevelopmentLogsBucketObjects"
+    effect = "Allow"
+    actions = [
+      "s3:AbortMultipartUpload",
+      "s3:GetObject",
+      "s3:PutObject",
+    ]
+    resources = ["arn:aws:s3:::${var.dev_logs_bucket_name}/*"]
+  }
+
+  statement {
+    sid       = "ListProductionLogsBucket"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::${var.prod_logs_bucket_name}"]
+  }
+
+  statement {
+    sid    = "UseProductionLogsBucketObjects"
+    effect = "Allow"
+    actions = [
+      "s3:AbortMultipartUpload",
+      "s3:GetObject",
+      "s3:PutObject",
+    ]
+    resources = ["arn:aws:s3:::${var.prod_logs_bucket_name}/*"]
   }
 
   statement {
@@ -118,7 +154,7 @@ resource "aws_security_group" "cluster" {
   }
 
   tags = {
-    Name = "${var.project_name}-${terraform.workspace}-cluster"
+    Name = "${var.display_name_prefix}-${terraform.workspace}-cluster"
   }
 }
 
