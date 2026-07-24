@@ -127,3 +127,62 @@ EOF
 systemctl daemon-reload
 systemctl enable --now kubeadm-join-command-publisher.timer
 systemctl start kubeadm-join-command-publisher.service
+
+# Remove only worker Node records whose matching EC2 instance is confirmed as
+# terminated. A temporary Kubernetes NotReady condition is never enough.
+cat > /usr/local/sbin/cleanup-terminated-kubernetes-workers <<'EOF'
+#!/bin/bash
+
+set -euo pipefail
+
+export KUBECONFIG=/etc/kubernetes/admin.conf
+
+kubectl get nodes \
+  --selector='!node-role.kubernetes.io/control-plane' \
+  --output=jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{end}{"\n"}{end}' |
+while read -r node_name internal_ip; do
+  if [ -z "$node_name" ] || [ -z "$internal_ip" ]; then
+    continue
+  fi
+
+  instance_state="$(aws ec2 describe-instances \
+    --region "${aws_region}" \
+    --filters "Name=private-ip-address,Values=$internal_ip" \
+    --query 'Reservations[].Instances[].State.Name' \
+    --output text)"
+
+  if [ "$instance_state" = "terminated" ]; then
+    kubectl delete node "$node_name"
+  fi
+done
+EOF
+
+chmod 0700 /usr/local/sbin/cleanup-terminated-kubernetes-workers
+
+cat > /etc/systemd/system/kubernetes-stale-worker-cleanup.service <<'EOF'
+[Unit]
+Description=Remove Kubernetes worker records for terminated EC2 instances
+After=network-online.target kubelet.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cleanup-terminated-kubernetes-workers
+EOF
+
+cat > /etc/systemd/system/kubernetes-stale-worker-cleanup.timer <<'EOF'
+[Unit]
+Description=Check for terminated Kubernetes workers
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+Persistent=true
+Unit=kubernetes-stale-worker-cleanup.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now kubernetes-stale-worker-cleanup.timer

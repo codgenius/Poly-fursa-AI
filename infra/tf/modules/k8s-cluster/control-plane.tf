@@ -29,6 +29,21 @@ resource "aws_iam_role_policy" "control_plane_ssm_publish" {
   policy = data.aws_iam_policy_document.control_plane_ssm_publish.json
 }
 
+data "aws_iam_policy_document" "control_plane_worker_lookup" {
+  statement {
+    sid       = "InspectWorkerInstanceState"
+    effect    = "Allow"
+    actions   = ["ec2:DescribeInstances"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "control_plane_worker_lookup" {
+  name   = "${var.project_name}-${terraform.workspace}-inspect-workers"
+  role   = aws_iam_role.control_plane.id
+  policy = data.aws_iam_policy_document.control_plane_worker_lookup.json
+}
+
 # The single EC2 control-plane instance. Its user-data template installs and
 # initializes Kubernetes automatically during the instance's first boot.
 resource "aws_instance" "control_plane" {
@@ -68,6 +83,7 @@ resource "aws_instance" "control_plane" {
 
   depends_on = [
     aws_iam_role_policy.control_plane_ssm_publish,
+    aws_iam_role_policy.control_plane_worker_lookup,
     aws_iam_role_policy_attachment.control_plane_ssm,
   ]
 }
