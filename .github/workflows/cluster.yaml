@@ -409,7 +409,10 @@ jobs:
             -o yaml |
             kubectl apply -f -
 
-          kubectl apply -f "$bootstrap_directory/argo"
+          # Bootstrap only the app-of-apps root. ArgoCD then owns and
+          # reconciles every child Application from Git, avoiding dual
+          # management by both kubectl apply and the parent Application.
+          kubectl apply -f "$bootstrap_directory/argo/app-of-apps.yaml"
 
           kubectl get applications -n argocd
           REMOTE
