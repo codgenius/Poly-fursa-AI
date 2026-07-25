@@ -1,0 +1,163 @@
+name: Build images and update Kubernetes manifests
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+    paths:
+      - services/img-proc-mcp/**
+      - services/yolo/**
+      - services/agent/**
+      - services/frontend/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: polyai-cd-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+          ssh-key: ${{ secrets.CD_DEPLOY_KEY }}
+
+      - name: Detect changed services
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            mcp:
+              - services/img-proc-mcp/**
+            yolo:
+              - services/yolo/**
+            agent:
+              - services/agent/**
+            frontend:
+              - services/frontend/**
+
+      - name: Select environment and image tag
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF_NAME" == "dev" ]]; then
+            echo "manifest_environment=dev" >> "$GITHUB_ENV"
+          elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "manifest_environment=prod" >> "$GITHUB_ENV"
+          else
+            echo "Unsupported branch: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+          echo "image_tag=${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Image Processing MCP
+        if: steps.changes.outputs.mcp == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/img-proc-mcp
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/img-proc-mcp:${{ env.image_tag }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/img-proc-mcp:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/img-proc-mcp:buildcache,mode=max
+
+      - name: Build and push YOLO
+        if: steps.changes.outputs.yolo == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/yolo
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/yolo-service:${{ env.image_tag }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/yolo-service:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/yolo-service:buildcache,mode=max
+
+      - name: Build and push Agent
+        if: steps.changes.outputs.agent == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/agent
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/agent-service:${{ env.image_tag }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/agent-service:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/agent-service:buildcache,mode=max
+
+      - name: Build and push Frontend
+        if: steps.changes.outputs.frontend == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/frontend
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/frontend-service:${{ env.image_tag }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/frontend-service:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/frontend-service:buildcache,mode=max
+
+      - name: Update changed image tags
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          MCP_CHANGED: ${{ steps.changes.outputs.mcp }}
+          YOLO_CHANGED: ${{ steps.changes.outputs.yolo }}
+          AGENT_CHANGED: ${{ steps.changes.outputs.agent }}
+          FRONTEND_CHANGED: ${{ steps.changes.outputs.frontend }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$MCP_CHANGED" == "true" ]]; then
+            manifest="infra/k8s/${manifest_environment}/04-mcp/deployment-img-proc-mcp-${manifest_environment}.yaml"
+            sed -i \
+              "s|image: .*/img-proc-mcp:.*|image: ${DOCKERHUB_USERNAME}/img-proc-mcp:${image_tag}|" \
+              "$manifest"
+          fi
+
+          if [[ "$YOLO_CHANGED" == "true" ]]; then
+            manifest="infra/k8s/${manifest_environment}/05-yolo/deployment-yolo-${manifest_environment}.yaml"
+            sed -i \
+              "s|image: .*/yolo-service:.*|image: ${DOCKERHUB_USERNAME}/yolo-service:${image_tag}|" \
+              "$manifest"
+          fi
+
+          if [[ "$AGENT_CHANGED" == "true" ]]; then
+            manifest="infra/k8s/${manifest_environment}/07-agent/deployment-agent-${manifest_environment}.yaml"
+            sed -i \
+              "s|image: .*/agent-service:.*|image: ${DOCKERHUB_USERNAME}/agent-service:${image_tag}|" \
+              "$manifest"
+          fi
+
+          if [[ "$FRONTEND_CHANGED" == "true" ]]; then
+            manifest="infra/k8s/${manifest_environment}/08-frontend/deployment-frontend-${manifest_environment}.yaml"
+            sed -i \
+              "s|image: .*/frontend-service:.*|image: ${DOCKERHUB_USERNAME}/frontend-service:${image_tag}|" \
+              "$manifest"
+          fi
+
+      - name: Commit and push manifest updates
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "infra/k8s/${manifest_environment}/"
+
+          if git diff --cached --quiet; then
+            echo "No manifest image tag changed."
+            exit 0
+          fi
+
+          git commit -m "ci: update ${manifest_environment} image tags [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
