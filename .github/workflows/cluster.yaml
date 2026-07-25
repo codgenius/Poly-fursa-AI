@@ -297,6 +297,17 @@ jobs:
 
           kubectl get --raw=/readyz >/dev/null
 
+          # A scheduled account shutdown can terminate every worker before the
+          # control plane restarts. Remove only Node records that the existing
+          # cleanup service confirms no longer have a live EC2 instance. The
+          # service deliberately requires two confirmations, so invoke both
+          # idempotent passes before DaemonSet readiness checks count Nodes.
+          if systemctl cat kubernetes-stale-worker-cleanup.service \
+            >/dev/null 2>&1; then
+            sudo systemctl start kubernetes-stale-worker-cleanup.service
+            sudo systemctl start kubernetes-stale-worker-cleanup.service
+          fi
+
           kubectl apply -f \
             https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/calico.yaml
 
