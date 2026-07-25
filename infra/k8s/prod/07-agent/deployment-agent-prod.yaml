@@ -4,7 +4,11 @@ metadata:
   name: agent
   namespace: prod
 spec:
-  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
   selector:
     matchLabels:
       app: agent
