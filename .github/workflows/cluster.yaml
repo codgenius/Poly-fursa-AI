@@ -1,0 +1,428 @@
+name: Provision and bootstrap Kubernetes cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: AWS region with matching backend and tfvars files
+        required: true
+        default: us-east-1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kubernetes-cluster-${{ inputs.region }}
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    name: Provision
+    runs-on: ubuntu-latest
+    outputs:
+      control_plane_ip: ${{ steps.cluster_output.outputs.control_plane_ip }}
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: infra/tf
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.region }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+          terraform_wrapper: false
+
+      - name: Validate regional configuration
+        env:
+          TARGET_REGION: ${{ inputs.region }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$TARGET_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]; then
+            echo "Invalid AWS region format: $TARGET_REGION" >&2
+            exit 1
+          fi
+
+          test -f "backend/${TARGET_REGION}.hcl"
+          test -f "regions/${TARGET_REGION}.tfvars"
+
+      - name: Initialize Terraform backend
+        env:
+          TARGET_REGION: ${{ inputs.region }}
+        run: |
+          set -euo pipefail
+
+          terraform init \
+            -reconfigure \
+            -backend-config="backend/${TARGET_REGION}.hcl"
+
+      - name: Select regional workspace
+        env:
+          TARGET_REGION: ${{ inputs.region }}
+        run: |
+          set -euo pipefail
+
+          terraform workspace select "$TARGET_REGION" ||
+            terraform workspace new "$TARGET_REGION"
+
+      - name: Validate Terraform
+        run: |
+          set -euo pipefail
+
+          terraform fmt -check -recursive
+          terraform validate
+
+      - name: Apply Terraform
+        env:
+          TARGET_REGION: ${{ inputs.region }}
+        run: |
+          set -euo pipefail
+
+          terraform apply \
+            -auto-approve \
+            -var-file="regions/${TARGET_REGION}.tfvars"
+
+      - name: Ensure control plane is running
+        env:
+          TARGET_REGION: ${{ inputs.region }}
+        run: |
+          set -euo pipefail
+
+          instance_id="$(terraform output -json cluster |
+            jq -r '.control_plane_instance_id')"
+
+          if [[ -z "$instance_id" || "$instance_id" == "null" ]]; then
+            echo "Terraform did not return a control-plane instance ID." >&2
+            exit 1
+          fi
+
+          instance_state="$(aws ec2 describe-instances \
+            --region "$TARGET_REGION" \
+            --instance-ids "$instance_id" \
+            --query 'Reservations[0].Instances[0].State.Name' \
+            --output text)"
+
+          if [[ "$instance_state" == "stopping" ]]; then
+            aws ec2 wait instance-stopped \
+              --region "$TARGET_REGION" \
+              --instance-ids "$instance_id"
+            instance_state="stopped"
+          fi
+
+          if [[ "$instance_state" == "stopped" ]]; then
+            aws ec2 start-instances \
+              --region "$TARGET_REGION" \
+              --instance-ids "$instance_id"
+          elif [[ "$instance_state" != "pending" &&
+                  "$instance_state" != "running" ]]; then
+            echo "Unexpected control-plane state: $instance_state" >&2
+            exit 1
+          fi
+
+          aws ec2 wait instance-running \
+            --region "$TARGET_REGION" \
+            --instance-ids "$instance_id"
+
+          aws ec2 wait instance-status-ok \
+            --region "$TARGET_REGION" \
+            --instance-ids "$instance_id"
+
+          terraform apply \
+            -refresh-only \
+            -auto-approve \
+            -var-file="regions/${TARGET_REGION}.tfvars"
+
+      - name: Export control-plane IP
+        id: cluster_output
+        run: |
+          set -euo pipefail
+
+          control_plane_ip="$(terraform output -json cluster |
+            jq -r '.control_plane_public_ip')"
+
+          if [[ -z "$control_plane_ip" || "$control_plane_ip" == "null" ]]; then
+            echo "Terraform did not return a control-plane public IP." >&2
+            exit 1
+          fi
+
+          echo "control_plane_ip=$control_plane_ip" >> "$GITHUB_OUTPUT"
+
+  bootstrap:
+    name: Bootstrap
+    needs: provision
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare bootstrap files
+        env:
+          CONTROL_PLANE_SSH_KEY: ${{ secrets.CONTROL_PLANE_SSH_KEY }}
+          DEV_GRAFANA_ADMIN_PASSWORD: ${{ secrets.DEV_GRAFANA_ADMIN_PASSWORD }}
+          PROD_GRAFANA_ADMIN_PASSWORD: ${{ secrets.PROD_GRAFANA_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          test -n "$CONTROL_PLANE_SSH_KEY"
+          test -n "$DEV_GRAFANA_ADMIN_PASSWORD"
+          test -n "$PROD_GRAFANA_ADMIN_PASSWORD"
+
+          umask 077
+          bootstrap_directory="$RUNNER_TEMP/polyai-bootstrap"
+          mkdir -p "$bootstrap_directory"
+          chmod 700 "$bootstrap_directory"
+
+          printf '%s\n' "$CONTROL_PLANE_SSH_KEY" \
+            > "$bootstrap_directory/control-plane-key"
+          printf '%s' "$DEV_GRAFANA_ADMIN_PASSWORD" \
+            > "$bootstrap_directory/dev-grafana-password"
+          printf '%s' "$PROD_GRAFANA_ADMIN_PASSWORD" \
+            > "$bootstrap_directory/prod-grafana-password"
+
+          chmod 600 \
+            "$bootstrap_directory/control-plane-key" \
+            "$bootstrap_directory/dev-grafana-password" \
+            "$bootstrap_directory/prod-grafana-password"
+
+          cp -R infra/k8s/addons "$bootstrap_directory/addons"
+          cp -R infra/k8s/argo "$bootstrap_directory/argo"
+
+      - name: Wait for control-plane readiness
+        env:
+          CONTROL_PLANE_IP: ${{ needs.provision.outputs.control_plane_ip }}
+        run: |
+          set -euo pipefail
+
+          bootstrap_directory="$RUNNER_TEMP/polyai-bootstrap"
+          ssh_key="$bootstrap_directory/control-plane-key"
+          known_hosts="$bootstrap_directory/known_hosts"
+          ready=false
+
+          for attempt in $(seq 1 60); do
+            if ssh \
+              -i "$ssh_key" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=5 \
+              -o StrictHostKeyChecking=accept-new \
+              -o UserKnownHostsFile="$known_hosts" \
+              "ubuntu@${CONTROL_PLANE_IP}" \
+              'test -f "$HOME/.kube/config" &&
+               kubectl get --raw=/readyz >/dev/null 2>&1'; then
+              ready=true
+              break
+            fi
+
+            echo "Control plane is not ready yet (attempt ${attempt}/60)."
+            sleep 10
+          done
+
+          if [[ "$ready" != "true" ]]; then
+            echo "Control plane did not become ready within 10 minutes." >&2
+            exit 1
+          fi
+
+      - name: Copy bootstrap files
+        env:
+          CONTROL_PLANE_IP: ${{ needs.provision.outputs.control_plane_ip }}
+        run: |
+          set -euo pipefail
+
+          bootstrap_directory="$RUNNER_TEMP/polyai-bootstrap"
+          ssh_key="$bootstrap_directory/control-plane-key"
+          known_hosts="$bootstrap_directory/known_hosts"
+
+          ssh \
+            -i "$ssh_key" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" \
+            "ubuntu@${CONTROL_PLANE_IP}" \
+            'rm -rf /tmp/polyai-bootstrap &&
+             mkdir -m 700 /tmp/polyai-bootstrap'
+
+          scp \
+            -i "$ssh_key" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" \
+            -r \
+            "$bootstrap_directory/addons" \
+            "$bootstrap_directory/argo" \
+            "$bootstrap_directory/dev-grafana-password" \
+            "$bootstrap_directory/prod-grafana-password" \
+            "ubuntu@${CONTROL_PLANE_IP}:/tmp/polyai-bootstrap/"
+
+      - name: Install cluster add-ons and Applications
+        env:
+          CONTROL_PLANE_IP: ${{ needs.provision.outputs.control_plane_ip }}
+        run: |
+          set -euo pipefail
+
+          bootstrap_directory="$RUNNER_TEMP/polyai-bootstrap"
+          ssh_key="$bootstrap_directory/control-plane-key"
+          known_hosts="$bootstrap_directory/known_hosts"
+
+          ssh \
+            -i "$ssh_key" \
+            -o BatchMode=yes \
+            -o ServerAliveInterval=30 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" \
+            "ubuntu@${CONTROL_PLANE_IP}" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+
+          export KUBECONFIG="$HOME/.kube/config"
+          bootstrap_directory="/tmp/polyai-bootstrap"
+
+          cleanup() {
+            rm -f \
+              "$bootstrap_directory/dev-grafana-password" \
+              "$bootstrap_directory/prod-grafana-password"
+          }
+          trap cleanup EXIT
+
+          kubectl get --raw=/readyz >/dev/null
+
+          kubectl apply -f \
+            https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/calico.yaml
+
+          kubectl rollout status \
+            daemonset/calico-node \
+            -n kube-system \
+            --timeout=10m
+
+          kubectl rollout status \
+            deployment/calico-kube-controllers \
+            -n kube-system \
+            --timeout=10m
+
+          worker_ready=false
+          for attempt in $(seq 1 60); do
+            ready_workers="$(kubectl get nodes \
+              -l '!node-role.kubernetes.io/control-plane' \
+              --no-headers 2>/dev/null |
+              awk '$2 == "Ready" { count++ } END { print count + 0 }')"
+
+            if (( ready_workers > 0 )); then
+              worker_ready=true
+              break
+            fi
+
+            echo "Waiting for a Ready worker node (attempt ${attempt}/60)."
+            sleep 10
+          done
+
+          if [[ "$worker_ready" != "true" ]]; then
+            echo "No worker node became Ready within 10 minutes." >&2
+            exit 1
+          fi
+
+          kubectl apply -k \
+            "github.com/kubernetes-sigs/aws-ebs-csi-driver/deploy/kubernetes/overlays/stable/?ref=release-1.62"
+
+          kubectl rollout status \
+            deployment/ebs-csi-controller \
+            -n kube-system \
+            --timeout=10m
+
+          kubectl apply -f "$bootstrap_directory/addons/ebs-storage-class.yaml"
+          kubectl apply -f "$bootstrap_directory/addons/metrics-server/components.yaml"
+
+          kubectl rollout status \
+            deployment/metrics-server \
+            -n kube-system \
+            --timeout=10m
+
+          kubectl create namespace argocd \
+            --dry-run=client \
+            -o yaml |
+            kubectl apply -f -
+
+          kubectl apply \
+            -n argocd \
+            -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+          kubectl wait \
+            --for=condition=Established \
+            crd/applications.argoproj.io \
+            --timeout=5m
+
+          kubectl rollout status \
+            deployment \
+            -n argocd \
+            --all \
+            --timeout=10m
+
+          kubectl rollout status \
+            statefulset \
+            -n argocd \
+            --all \
+            --timeout=10m
+
+          for namespace in dev prod; do
+            kubectl create namespace "$namespace" \
+              --dry-run=client \
+              -o yaml |
+              kubectl apply -f -
+          done
+
+          kubectl create secret generic grafana-admin \
+            -n dev \
+            --from-file=admin-password="$bootstrap_directory/dev-grafana-password" \
+            --dry-run=client \
+            -o yaml |
+            kubectl apply -f -
+
+          kubectl create secret generic grafana-admin \
+            -n prod \
+            --from-file=admin-password="$bootstrap_directory/prod-grafana-password" \
+            --dry-run=client \
+            -o yaml |
+            kubectl apply -f -
+
+          kubectl apply -f "$bootstrap_directory/argo"
+
+          kubectl get applications -n argocd
+          REMOTE
+
+      - name: Remove remote bootstrap secrets
+        if: always()
+        continue-on-error: true
+        env:
+          CONTROL_PLANE_IP: ${{ needs.provision.outputs.control_plane_ip }}
+        run: |
+          bootstrap_directory="$RUNNER_TEMP/polyai-bootstrap"
+          ssh_key="$bootstrap_directory/control-plane-key"
+          known_hosts="$bootstrap_directory/known_hosts"
+
+          if [[ -n "$CONTROL_PLANE_IP" && -f "$ssh_key" ]]; then
+            ssh \
+              -i "$ssh_key" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=5 \
+              -o StrictHostKeyChecking=accept-new \
+              -o UserKnownHostsFile="$known_hosts" \
+              "ubuntu@${CONTROL_PLANE_IP}" \
+              'rm -f \
+                /tmp/polyai-bootstrap/dev-grafana-password \
+                /tmp/polyai-bootstrap/prod-grafana-password'
+          fi
+
+      - name: Remove local bootstrap secrets
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/polyai-bootstrap"
