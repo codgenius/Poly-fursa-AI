@@ -1,6 +1,6 @@
 import type { ChatMessage } from "./types";
 
-const AGENT_URL = process.env.NEXT_PUBLIC_AGENT_URL ?? "http://localhost:8000";
+const AGENT_URL = process.env.NEXT_PUBLIC_AGENT_URL ?? "/agent-api";
 
 export interface ChatResponse {
   response: string;
