@@ -9,6 +9,10 @@ spec:
     repoURL: https://github.com/codgenius/Poly-fursa-AI.git
     targetRevision: main
     path: infra/k8s/argo
+    directory:
+      # Bootstrap applies this root Application directly. Excluding its own
+      # manifest prevents the parent from recursively managing itself.
+      exclude: app-of-apps.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
