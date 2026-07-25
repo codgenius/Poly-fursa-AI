@@ -24,7 +24,7 @@ worker_instance_type    = "t3.medium"
 worker_volume_size      = 20
 worker_min_size         = 1
 worker_max_size         = 3
-worker_desired_capacity = 1
+worker_desired_capacity = 2
 
 image_bucket_name     = "hadi-polyai-images-hk2026"
 dev_logs_bucket_name  = "hadi-dev-logs-bucket"
