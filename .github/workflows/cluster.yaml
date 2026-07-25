@@ -363,17 +363,19 @@ jobs:
             crd/applications.argoproj.io \
             --timeout=5m
 
-          kubectl rollout status \
-            deployment \
-            -n argocd \
-            --all \
-            --timeout=10m
+          while read -r deployment; do
+            kubectl rollout status \
+              "$deployment" \
+              -n argocd \
+              --timeout=10m
+          done < <(kubectl get deployments -n argocd -o name)
 
-          kubectl rollout status \
-            statefulset \
-            -n argocd \
-            --all \
-            --timeout=10m
+          while read -r statefulset; do
+            kubectl rollout status \
+              "$statefulset" \
+              -n argocd \
+              --timeout=10m
+          done < <(kubectl get statefulsets -n argocd -o name)
 
           for namespace in dev prod; do
             kubectl create namespace "$namespace" \
