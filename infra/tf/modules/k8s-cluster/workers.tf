@@ -80,7 +80,7 @@ resource "aws_launch_template" "worker" {
 }
 
 resource "aws_autoscaling_group" "worker" {
-  name                = "${var.project_name}-${terraform.workspace}-worker"
+  name                = "${var.display_name_prefix}-${terraform.workspace}-worker"
   min_size            = var.worker_min_size
   max_size            = var.worker_max_size
   desired_capacity    = var.worker_desired_capacity
