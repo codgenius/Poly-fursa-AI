@@ -34,6 +34,8 @@ jobs:
         id: changes
         uses: dorny/paths-filter@v3
         with:
+          base: ${{ github.event.before }}
+          ref: ${{ github.sha }}
           filters: |
             mcp:
               - services/img-proc-mcp/**
