@@ -1,5 +1,5 @@
 import type { ChatMessage } from "./types";
-
+// Uses the configured public Agent URL, falling back to the same-origin proxy route.
 const AGENT_URL = process.env.NEXT_PUBLIC_AGENT_URL ?? "/agent-api";
 
 export interface ChatResponse {
