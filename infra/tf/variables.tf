@@ -121,3 +121,14 @@ variable "bedrock_model_arns" {
   description = "Foundation-model ARNs that application workloads may invoke."
   type        = list(string)
 }
+
+variable "route53_zone_name" {
+  description = "Apex domain of the shared Route 53 hosted zone."
+  type        = string
+  default     = "fursa.click"
+}
+
+variable "alertmanager_email" {
+  description = "Email address that receives Alertmanager SNS notifications."
+  type        = string
+}

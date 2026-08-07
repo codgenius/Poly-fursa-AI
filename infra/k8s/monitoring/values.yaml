@@ -1,0 +1,107 @@
+prometheus:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+    - prometheus.hadi-polyai.fursa.click
+    paths:
+    - /
+    pathType: Prefix
+
+  prometheusSpec:
+    retention: 30d
+    serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ebs-sc
+          accessModes:
+          - ReadWriteOnce
+          resources:
+            requests:
+              storage: 3Gi
+
+  # Scrape the ingress-nginx controller metrics via the dedicated ClusterIP
+  # metrics service created in infra/k8s/addons/ingress-nginx/metrics-service.yaml.
+  additionalServiceMonitors:
+  - name: ingress-nginx
+    namespaceSelector:
+      matchNames:
+      - ingress-nginx
+    selector:
+      matchLabels:
+        app.kubernetes.io/name: ingress-nginx
+        app.kubernetes.io/component: controller
+    endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+
+grafana:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+    - grafana.hadi-polyai.fursa.click
+    paths:
+    - /
+    pathType: Prefix
+
+  admin:
+    existingSecret: grafana-monitoring-admin
+    userKey: admin-user
+    passwordKey: admin-password
+
+  persistence:
+    enabled: true
+    storageClassName: ebs-sc
+    size: 1Gi
+
+alertmanager:
+  alertmanagerSpec:
+    # The alertmanager-main-config Secret is created at bootstrap time.
+    # The bootstrap script substitutes the real SNS topic ARN from Terraform
+    # output into alertmanager-config-template.yaml before creating the Secret.
+    configSecret: alertmanager-main-config
+
+# Top-level chart key — creates PrometheusRule CRDs in the monitoring namespace.
+# Metric names (http_request_duration_seconds_bucket, http_requests_total) are
+# placeholders; verify against actual /metrics output after deployment and
+# adjust as needed.
+additionalPrometheusRulesMap:
+  polyai-alerts:
+    groups:
+    - name: polyai.agent
+      rules:
+      - alert: AgentHighLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket{namespace=~"dev|prod"}[5m]))
+            by (le, namespace)
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent p99 latency above 2 s ({{ $labels.namespace }})"
+          description: >
+            The 99th-percentile HTTP latency of the agent service in
+            {{ $labels.namespace }} has exceeded 2 seconds for 5 minutes.
+    - name: polyai.yolo
+      rules:
+      - alert: YoloHighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{namespace=~"dev|prod", status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{namespace=~"dev|prod"}[5m]))
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "YOLO 5xx error rate above 5 % ({{ $labels.namespace }})"
+          description: >
+            The HTTP 5xx error rate of the yolo service in
+            {{ $labels.namespace }} has exceeded 5 % for 2 minutes.
