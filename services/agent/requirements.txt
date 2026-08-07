@@ -12,6 +12,7 @@ langchain[google-genai]
 # MCP client
 langchain-mcp-adapters
 
+# Network
 httpx
 pydantic
 
