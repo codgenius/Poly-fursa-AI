@@ -18,3 +18,7 @@ spec:
         image: hadikhier/img-proc-mcp:0.0.1
         ports:
         - containerPort: 9000
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "128Mi"
