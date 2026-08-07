@@ -17,8 +17,7 @@ spec:
       - $values/infra/k8s/monitoring/values.yaml
   - repoURL: https://github.com/codgenius/Poly-fursa-AI.git
     # Track the same branch where values.yaml lives.
-    # Change to main when this Application is promoted to the main branch.
-    targetRevision: dev
+    targetRevision: main
     ref: values
   destination:
     server: https://kubernetes.default.svc
