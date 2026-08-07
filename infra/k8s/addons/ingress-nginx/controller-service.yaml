@@ -30,8 +30,3 @@ spec:
     targetPort: https
     protocol: TCP
     nodePort: 30443
-  - name: metrics
-    port: 10254
-    targetPort: metrics
-    protocol: TCP
-    nodePort: 31254

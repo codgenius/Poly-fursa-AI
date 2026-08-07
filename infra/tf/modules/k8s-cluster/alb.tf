@@ -47,17 +47,17 @@ resource "aws_lb_target_group" "this" {
 
   health_check {
     enabled = true
-    # Port 10254 (NodePort 31254) is the ingress-nginx controller's own healthz
-    # server; it returns HTTP 200 on /healthz when the controller is ready.
-    # Port 30080 returns 404 for unknown hosts and is not suitable for health checks.
-    port                = "31254"
-    path                = "/healthz"
+    # ingress-nginx returns 404 for requests without a matching Ingress host.
+    # The traffic NodePort (30080) is reachable from the ALB; use it so no
+    # extra NodePort or security-group rule is needed for health checking.
+    port                = "traffic-port"
+    path                = "/"
     protocol            = "HTTP"
     healthy_threshold   = 2
     unhealthy_threshold = 3
     interval            = 15
     timeout             = 5
-    matcher             = "200"
+    matcher             = "404"
   }
 
   tags = {
