@@ -297,6 +297,17 @@ jobs:
 
           kubectl get --raw=/readyz >/dev/null
 
+          # A scheduled account shutdown can terminate every worker before the
+          # control plane restarts. Remove only Node records that the existing
+          # cleanup service confirms no longer have a live EC2 instance. The
+          # service deliberately requires two confirmations, so invoke both
+          # idempotent passes before DaemonSet readiness checks count Nodes.
+          if systemctl cat kubernetes-stale-worker-cleanup.service \
+            >/dev/null 2>&1; then
+            sudo systemctl start kubernetes-stale-worker-cleanup.service
+            sudo systemctl start kubernetes-stale-worker-cleanup.service
+          fi
+
           kubectl apply -f \
             https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/calico.yaml
 
@@ -353,6 +364,8 @@ jobs:
             kubectl apply -f -
 
           kubectl apply \
+            --server-side \
+            --force-conflicts \
             -n argocd \
             -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
@@ -361,17 +374,19 @@ jobs:
             crd/applications.argoproj.io \
             --timeout=5m
 
-          kubectl rollout status \
-            deployment \
-            -n argocd \
-            --all \
-            --timeout=10m
+          while read -r deployment; do
+            kubectl rollout status \
+              "$deployment" \
+              -n argocd \
+              --timeout=10m
+          done < <(kubectl get deployments -n argocd -o name)
 
-          kubectl rollout status \
-            statefulset \
-            -n argocd \
-            --all \
-            --timeout=10m
+          while read -r statefulset; do
+            kubectl rollout status \
+              "$statefulset" \
+              -n argocd \
+              --timeout=10m
+          done < <(kubectl get statefulsets -n argocd -o name)
 
           for namespace in dev prod; do
             kubectl create namespace "$namespace" \
@@ -394,7 +409,10 @@ jobs:
             -o yaml |
             kubectl apply -f -
 
-          kubectl apply -f "$bootstrap_directory/argo"
+          # Bootstrap only the app-of-apps root. ArgoCD then owns and
+          # reconciles every child Application from Git, avoiding dual
+          # management by both kubectl apply and the parent Application.
+          kubectl apply -f "$bootstrap_directory/argo/app-of-apps.yaml"
 
           kubectl get applications -n argocd
           REMOTE

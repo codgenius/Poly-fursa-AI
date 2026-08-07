@@ -47,3 +47,9 @@ Thumbs.db
 services/frontend/.next/
 services/frontend/node_modules/
 services/frontend/out/
+
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log

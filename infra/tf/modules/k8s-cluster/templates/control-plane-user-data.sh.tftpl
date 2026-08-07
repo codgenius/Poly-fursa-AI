@@ -1,0 +1,206 @@
+#!/bin/bash
+
+set -euxo pipefail
+
+exec > >(tee /var/log/control-plane-bootstrap.log | logger -t control-plane-bootstrap -s 2>/dev/console) 2>&1
+
+export DEBIAN_FRONTEND=noninteractive
+
+# Kubernetes requires swap to remain disabled.
+swapoff -a
+sed -i '/[[:space:]]swap[[:space:]]/s/^/#/' /etc/fstab
+
+# Load the kernel modules and network settings needed by Kubernetes networking.
+cat > /etc/modules-load.d/kubernetes.conf <<'EOF'
+overlay
+br_netfilter
+EOF
+
+modprobe overlay
+modprobe br_netfilter
+
+cat > /etc/sysctl.d/99-kubernetes.conf <<'EOF'
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+
+sysctl --system
+
+# Add the official Kubernetes and CRI-O package repositories.
+apt-get update
+apt-get install -y awscli ca-certificates curl gpg
+
+install -m 0755 -d /etc/apt/keyrings
+
+curl -fsSL "https://pkgs.k8s.io/core:/stable:/${kubernetes_minor_version}/deb/Release.key" |
+  gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${kubernetes_minor_version}/deb/ /" \
+  > /etc/apt/sources.list.d/kubernetes.list
+
+curl -fsSL "https://download.opensuse.org/repositories/isv:/cri-o:/stable:/${crio_minor_version}/deb/Release.key" |
+  gpg --batch --yes --dearmor -o /etc/apt/keyrings/cri-o-apt-keyring.gpg
+
+echo "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://download.opensuse.org/repositories/isv:/cri-o:/stable:/${crio_minor_version}/deb/ /" \
+  > /etc/apt/sources.list.d/cri-o.list
+
+apt-get update
+apt-get install -y cri-o kubeadm kubectl kubelet
+apt-mark hold cri-o kubeadm kubectl kubelet
+
+systemctl enable --now crio
+systemctl enable kubelet
+
+# kubeadm init must run only once. The file it creates also acts as our marker,
+# so an ordinary reboot does not try to create the cluster again.
+if [ ! -f /etc/kubernetes/admin.conf ]; then
+  metadata_token="$(curl --fail --silent --show-error \
+    --request PUT \
+    --header 'X-aws-ec2-metadata-token-ttl-seconds: 21600' \
+    http://169.254.169.254/latest/api/token)"
+
+  private_ip="$(curl --fail --silent --show-error \
+    --header "X-aws-ec2-metadata-token: $metadata_token" \
+    http://169.254.169.254/latest/meta-data/local-ipv4)"
+
+  kubeadm init \
+    --apiserver-advertise-address="$private_ip" \
+    --cri-socket=unix:///var/run/crio/crio.sock \
+    --pod-network-cidr="${pod_network_cidr}"
+fi
+
+# Let the ubuntu SSH user run kubectl with the generated admin kubeconfig.
+install -d -m 0700 -o ubuntu -g ubuntu /home/ubuntu/.kube
+install -m 0600 -o ubuntu -g ubuntu /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+
+# This script creates a fresh 24-hour worker join command and creates or
+# overwrites its SecureString SSM parameter. Terraform never receives the token.
+cat > /usr/local/sbin/publish-kubeadm-join-command <<'EOF'
+#!/bin/bash
+
+set -euo pipefail
+
+if [ ! -f /etc/kubernetes/admin.conf ]; then
+  exit 1
+fi
+
+join_command="$(kubeadm token create --ttl 24h --print-join-command)"
+
+aws ssm put-parameter \
+  --region "${aws_region}" \
+  --name "${ssm_parameter_name}" \
+  --type SecureString \
+  --value "$join_command" \
+  --overwrite
+EOF
+
+chmod 0700 /usr/local/sbin/publish-kubeadm-join-command
+
+# A oneshot service lets systemd run the publisher now and from a timer.
+cat > /etc/systemd/system/kubeadm-join-command-publisher.service <<'EOF'
+[Unit]
+Description=Publish a fresh kubeadm worker join command to SSM
+After=network-online.target kubelet.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/publish-kubeadm-join-command
+EOF
+
+# Refresh at boot and every 12 hours, so the stored 24-hour token stays usable.
+cat > /etc/systemd/system/kubeadm-join-command-publisher.timer <<'EOF'
+[Unit]
+Description=Refresh the kubeadm worker join command
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=12h
+Persistent=true
+Unit=kubeadm-join-command-publisher.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now kubeadm-join-command-publisher.timer
+systemctl start kubeadm-join-command-publisher.service
+
+# Remove only worker Node records whose matching EC2 instance is confirmed as
+# terminated. A temporary Kubernetes NotReady condition is never enough.
+cat > /usr/local/sbin/cleanup-terminated-kubernetes-workers <<'EOF'
+#!/bin/bash
+
+set -euo pipefail
+
+export KUBECONFIG=/etc/kubernetes/admin.conf
+
+marker_directory=/var/lib/kubernetes-stale-worker-cleanup
+mkdir -p "$marker_directory"
+
+kubectl get nodes \
+  --selector='!node-role.kubernetes.io/control-plane' \
+  --output=jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{end}{"\n"}{end}' |
+while read -r node_name internal_ip; do
+  if [ -z "$node_name" ] || [ -z "$internal_ip" ]; then
+    continue
+  fi
+
+  instance_states="$(aws ec2 describe-instances \
+    --region "${aws_region}" \
+    --filters "Name=private-ip-address,Values=$internal_ip" \
+    --query 'Reservations[].Instances[].State.Name' \
+    --output text)"
+
+  marker_path="$marker_directory/$node_name"
+
+  # Any active matching EC2 state cancels a pending cleanup. A failed AWS CLI
+  # request exits the script and therefore cannot delete a Kubernetes Node.
+  if printf '%s\n' "$instance_states" |
+    grep -Eq '(^|[[:space:]])(pending|running|stopping|stopped)([[:space:]]|$)'; then
+    rm -f "$marker_path"
+    continue
+  fi
+
+  # AWS may report terminated or eventually return no matching instance. Mark
+  # the first observation and require the next timer run to confirm it.
+  if [ -f "$marker_path" ]; then
+    kubectl delete node "$node_name"
+    rm -f "$marker_path"
+  else
+    touch "$marker_path"
+  fi
+done
+EOF
+
+chmod 0700 /usr/local/sbin/cleanup-terminated-kubernetes-workers
+
+cat > /etc/systemd/system/kubernetes-stale-worker-cleanup.service <<'EOF'
+[Unit]
+Description=Remove Kubernetes worker records for terminated EC2 instances
+After=network-online.target kubelet.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cleanup-terminated-kubernetes-workers
+EOF
+
+cat > /etc/systemd/system/kubernetes-stale-worker-cleanup.timer <<'EOF'
+[Unit]
+Description=Check for terminated Kubernetes workers
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+Persistent=true
+Unit=kubernetes-stale-worker-cleanup.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now kubernetes-stale-worker-cleanup.timer
