@@ -145,6 +145,14 @@ resource "aws_security_group" "cluster" {
     cidr_blocks = [var.vpc_cidr]
   }
 
+  ingress {
+    description     = "NodePort HTTP from ALB"
+    from_port       = 30080
+    to_port         = 30080
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
   egress {
     description = "Allow outbound traffic"
     from_port   = 0

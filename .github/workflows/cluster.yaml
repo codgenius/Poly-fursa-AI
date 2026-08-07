@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       control_plane_ip: ${{ steps.cluster_output.outputs.control_plane_ip }}
+      sns_topic_arn: ${{ steps.cluster_output.outputs.sns_topic_arn }}
 
     defaults:
       run:
@@ -160,6 +161,16 @@ jobs:
 
           echo "control_plane_ip=$control_plane_ip" >> "$GITHUB_OUTPUT"
 
+          sns_topic_arn="$(terraform output -json cluster |
+            jq -r '.sns_topic_arn')"
+
+          if [[ -z "$sns_topic_arn" || "$sns_topic_arn" == "null" ]]; then
+            echo "Terraform did not return an SNS topic ARN." >&2
+            exit 1
+          fi
+
+          echo "sns_topic_arn=$sns_topic_arn" >> "$GITHUB_OUTPUT"
+
   bootstrap:
     name: Bootstrap
     needs: provision
@@ -174,12 +185,16 @@ jobs:
           CONTROL_PLANE_SSH_KEY: ${{ secrets.CONTROL_PLANE_SSH_KEY }}
           DEV_GRAFANA_ADMIN_PASSWORD: ${{ secrets.DEV_GRAFANA_ADMIN_PASSWORD }}
           PROD_GRAFANA_ADMIN_PASSWORD: ${{ secrets.PROD_GRAFANA_ADMIN_PASSWORD }}
+          SNS_TOPIC_ARN: ${{ needs.provision.outputs.sns_topic_arn }}
+          MONITORING_GRAFANA_ADMIN_PASSWORD: ${{ secrets.MONITORING_GRAFANA_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
 
           test -n "$CONTROL_PLANE_SSH_KEY"
           test -n "$DEV_GRAFANA_ADMIN_PASSWORD"
           test -n "$PROD_GRAFANA_ADMIN_PASSWORD"
+          test -n "$SNS_TOPIC_ARN"
+          test -n "$MONITORING_GRAFANA_ADMIN_PASSWORD"
 
           umask 077
           bootstrap_directory="$RUNNER_TEMP/polyai-bootstrap"
@@ -192,14 +207,21 @@ jobs:
             > "$bootstrap_directory/dev-grafana-password"
           printf '%s' "$PROD_GRAFANA_ADMIN_PASSWORD" \
             > "$bootstrap_directory/prod-grafana-password"
+          printf '%s' "$SNS_TOPIC_ARN" \
+            > "$bootstrap_directory/sns-topic-arn"
+          printf '%s' "$MONITORING_GRAFANA_ADMIN_PASSWORD" \
+            > "$bootstrap_directory/monitoring-grafana-password"
 
           chmod 600 \
             "$bootstrap_directory/control-plane-key" \
             "$bootstrap_directory/dev-grafana-password" \
-            "$bootstrap_directory/prod-grafana-password"
+            "$bootstrap_directory/prod-grafana-password" \
+            "$bootstrap_directory/sns-topic-arn" \
+            "$bootstrap_directory/monitoring-grafana-password"
 
           cp -R infra/k8s/addons "$bootstrap_directory/addons"
           cp -R infra/k8s/argo "$bootstrap_directory/argo"
+          cp -R infra/k8s/monitoring "$bootstrap_directory/monitoring"
 
       - name: Wait for control-plane readiness
         env:
@@ -262,8 +284,11 @@ jobs:
             -r \
             "$bootstrap_directory/addons" \
             "$bootstrap_directory/argo" \
+            "$bootstrap_directory/monitoring" \
             "$bootstrap_directory/dev-grafana-password" \
             "$bootstrap_directory/prod-grafana-password" \
+            "$bootstrap_directory/sns-topic-arn" \
+            "$bootstrap_directory/monitoring-grafana-password" \
             "ubuntu@${CONTROL_PLANE_IP}:/tmp/polyai-bootstrap/"
 
       - name: Install cluster add-ons and Applications
@@ -291,7 +316,9 @@ jobs:
           cleanup() {
             rm -f \
               "$bootstrap_directory/dev-grafana-password" \
-              "$bootstrap_directory/prod-grafana-password"
+              "$bootstrap_directory/prod-grafana-password" \
+              "$bootstrap_directory/sns-topic-arn" \
+              "$bootstrap_directory/monitoring-grafana-password"
           }
           trap cleanup EXIT
 
@@ -358,6 +385,19 @@ jobs:
             -n kube-system \
             --timeout=10m
 
+          # Install ingress-nginx (baremetal NodePort provider) from the
+          # official release manifest, then apply the fixed-NodePort Service
+          # override and metrics ClusterIP Service from addons.
+          kubectl apply -f \
+            https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.3/deploy/static/provider/baremetal/deploy.yaml
+
+          kubectl apply -f "$bootstrap_directory/addons/ingress-nginx/"
+
+          kubectl rollout status \
+            deployment/ingress-nginx-controller \
+            -n ingress-nginx \
+            --timeout=5m
+
           kubectl create namespace argocd \
             --dry-run=client \
             -o yaml |
@@ -395,6 +435,33 @@ jobs:
               kubectl apply -f -
           done
 
+          # Create the monitoring namespace and its bootstrap secrets before
+          # ArgoCD syncs the kube-prometheus-stack Application.
+          kubectl create namespace monitoring \
+            --dry-run=client \
+            -o yaml |
+            kubectl apply -f -
+
+          kubectl create secret generic grafana-monitoring-admin \
+            -n monitoring \
+            --from-literal=admin-user=admin \
+            --from-file=admin-password="$bootstrap_directory/monitoring-grafana-password" \
+            --dry-run=client \
+            -o yaml |
+            kubectl apply -f -
+
+          # Substitute the real SNS topic ARN into the Alertmanager config
+          # template and store it as a Kubernetes Secret. The kube-prometheus-stack
+          # chart reads this Secret via alertmanager.alertmanagerSpec.configSecret.
+          kubectl create secret generic alertmanager-main-config \
+            -n monitoring \
+            --from-literal=alertmanager.yaml="$(sed \
+              "s|__SNS_TOPIC_ARN__|$(cat "$bootstrap_directory/sns-topic-arn")|" \
+              "$bootstrap_directory/monitoring/alertmanager-config-template.yaml")" \
+            --dry-run=client \
+            -o yaml |
+            kubectl apply -f -
+
           kubectl create secret generic grafana-admin \
             -n dev \
             --from-file=admin-password="$bootstrap_directory/dev-grafana-password" \
@@ -409,10 +476,49 @@ jobs:
             -o yaml |
             kubectl apply -f -
 
+          # Apply kube-prometheus-stack before app-of-apps so the
+          # monitoring.coreos.com/v1 CRDs are established before ArgoCD
+          # syncs child Applications (agent-dev, yolo-dev) that contain
+          # ServiceMonitor resources. app-of-apps does not discover this
+          # file when it tracks main and the file only exists on dev.
+          kubectl apply -f "$bootstrap_directory/argo/kube-prometheus-stack.yaml"
+
+          # kubectl wait --for=condition=Established fails immediately with
+          # NotFound if the CRD object does not yet exist. Poll until ArgoCD
+          # has synced the chart and the CRD object appears, then assert
+          # Established.
+          crd_ready=false
+          for attempt in $(seq 1 60); do
+            if kubectl get crd servicemonitors.monitoring.coreos.com \
+              --ignore-not-found=true 2>/dev/null | grep -q servicemonitors; then
+              crd_ready=true
+              break
+            fi
+            echo "Waiting for servicemonitors CRD to appear (attempt ${attempt}/60)."
+            sleep 10
+          done
+
+          if [[ "$crd_ready" != "true" ]]; then
+            echo "servicemonitors.monitoring.coreos.com CRD did not appear within 10 minutes." >&2
+            echo "--- kube-prometheus-stack Application status ---" >&2
+            kubectl get application kube-prometheus-stack -n argocd -o yaml >&2 || true
+            exit 1
+          fi
+
+          kubectl wait \
+            --for=condition=Established \
+            crd/servicemonitors.monitoring.coreos.com \
+            --timeout=2m
+
           # Bootstrap only the app-of-apps root. ArgoCD then owns and
           # reconciles every child Application from Git, avoiding dual
           # management by both kubectl apply and the parent Application.
           kubectl apply -f "$bootstrap_directory/argo/app-of-apps.yaml"
+
+          # Apply the ArgoCD Ingress directly (not via app-of-apps) so it is
+          # available immediately after bootstrap without waiting for ArgoCD
+          # to sync. This avoids a circular dependency.
+          kubectl apply -f "$bootstrap_directory/addons/ingress-argocd.yaml"
 
           kubectl get applications -n argocd
           REMOTE
@@ -437,7 +543,9 @@ jobs:
               "ubuntu@${CONTROL_PLANE_IP}" \
               'rm -f \
                 /tmp/polyai-bootstrap/dev-grafana-password \
-                /tmp/polyai-bootstrap/prod-grafana-password'
+                /tmp/polyai-bootstrap/prod-grafana-password \
+                /tmp/polyai-bootstrap/sns-topic-arn \
+                /tmp/polyai-bootstrap/monitoring-grafana-password'
           fi
 
       - name: Remove local bootstrap secrets

@@ -38,3 +38,6 @@ bedrock_model_arns = [
   "arn:aws:bedrock:*::foundation-model/meta.llama3-1-8b-instruct-v1:0",
   "arn:aws:bedrock:*::foundation-model/mistral.mistral-7b-instruct-v0:2",
 ]
+
+route53_zone_name  = "fursa.click"
+alertmanager_email = "the_boss_h1995@hotmail.com"

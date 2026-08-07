@@ -1,0 +1,32 @@
+# Override the default ingress-nginx-controller Service created by the
+# official baremetal manifest to pin fixed NodePorts so the ALB target group
+# can reference them in advance.
+#
+# Apply order in bootstrap:
+#   1. kubectl apply -f https://.../baremetal/deploy.yaml   (creates namespace + base resources)
+#   2. kubectl apply -f "$bootstrap_directory/addons/ingress-nginx/"  (this file)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/instance: ingress-nginx
+    app.kubernetes.io/component: controller
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/component: controller
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+    nodePort: 30080
+  - name: https
+    port: 443
+    targetPort: https
+    protocol: TCP
+    nodePort: 30443

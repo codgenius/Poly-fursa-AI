@@ -20,4 +20,6 @@ module "k8s_cluster" {
   dev_logs_bucket_name        = var.dev_logs_bucket_name
   prod_logs_bucket_name       = var.prod_logs_bucket_name
   bedrock_model_arns          = var.bedrock_model_arns
+  route53_zone_name           = var.route53_zone_name
+  alertmanager_email          = var.alertmanager_email
 }
