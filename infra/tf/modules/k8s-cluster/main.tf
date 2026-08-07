@@ -153,14 +153,6 @@ resource "aws_security_group" "cluster" {
     security_groups = [aws_security_group.alb.id]
   }
 
-  ingress {
-    description     = "NodePort healthz from ALB"
-    from_port       = 31254
-    to_port         = 31254
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-  }
-
   egress {
     description = "Allow outbound traffic"
     from_port   = 0
