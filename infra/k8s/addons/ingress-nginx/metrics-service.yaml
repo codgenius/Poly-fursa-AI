@@ -1,0 +1,22 @@
+# Separate ClusterIP Service exposing port 10254 for in-cluster Prometheus scraping.
+# The NodePort 31254 on controller-service.yaml is used by the ALB health check;
+# this service is used by the ServiceMonitor inside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-nginx-controller-metrics
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/instance: ingress-nginx
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/component: controller
+  ports:
+  - name: metrics
+    port: 10254
+    targetPort: metrics
+    protocol: TCP

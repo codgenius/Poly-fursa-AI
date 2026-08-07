@@ -1,0 +1,22 @@
+global:
+  resolve_timeout: 5m
+route:
+  group_by: ['alertname', 'severity', 'namespace']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: sns-email
+receivers:
+- name: sns-email
+  sns_configs:
+  - api_url: https://sns.us-east-1.amazonaws.com
+    topic_arn: __SNS_TOPIC_ARN__
+    sigv4:
+      region: us-east-1
+inhibit_rules:
+- source_matchers:
+  - severity = critical
+  target_matchers:
+  - severity = warning
+  equal:
+  - alertname
