@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: yolo
   namespace: prod
+  labels:
+    app: yolo
 spec:
   type: ClusterIP
   selector:
