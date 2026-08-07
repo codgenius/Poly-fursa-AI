@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
       - name: yolo
-        image: hadikhier/yolo-service:704f991f6076
+        image: hadikhier/yolo-service:3fc778317d70
         ports:
         - containerPort: 8080
         env:

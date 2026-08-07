@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
       - name: frontend
-        image: hadikhier/frontend-service:c6e6e73fa1c4
+        image: hadikhier/frontend-service:3fc778317d70
         ports:
         - containerPort: 3000
         livenessProbe:
