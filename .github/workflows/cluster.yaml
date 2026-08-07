@@ -483,10 +483,32 @@ jobs:
           # file when it tracks main and the file only exists on dev.
           kubectl apply -f "$bootstrap_directory/argo/kube-prometheus-stack.yaml"
 
+          # kubectl wait --for=condition=Established fails immediately with
+          # NotFound if the CRD object does not yet exist. Poll until ArgoCD
+          # has synced the chart and the CRD object appears, then assert
+          # Established.
+          crd_ready=false
+          for attempt in $(seq 1 60); do
+            if kubectl get crd servicemonitors.monitoring.coreos.com \
+              --ignore-not-found=true 2>/dev/null | grep -q servicemonitors; then
+              crd_ready=true
+              break
+            fi
+            echo "Waiting for servicemonitors CRD to appear (attempt ${attempt}/60)."
+            sleep 10
+          done
+
+          if [[ "$crd_ready" != "true" ]]; then
+            echo "servicemonitors.monitoring.coreos.com CRD did not appear within 10 minutes." >&2
+            echo "--- kube-prometheus-stack Application status ---" >&2
+            kubectl get application kube-prometheus-stack -n argocd -o yaml >&2 || true
+            exit 1
+          fi
+
           kubectl wait \
             --for=condition=Established \
             crd/servicemonitors.monitoring.coreos.com \
-            --timeout=10m
+            --timeout=2m
 
           # Bootstrap only the app-of-apps root. ArgoCD then owns and
           # reconciles every child Application from Git, avoiding dual
