@@ -12,6 +12,10 @@ prometheus:
     retention: 30d
     serviceMonitorSelectorNilUsesHelmValues: false
     ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "512Mi"
     storageSpec:
       volumeClaimTemplate:
         spec:
@@ -57,6 +61,11 @@ grafana:
     enabled: true
     storageClassName: ebs-sc
     size: 1Gi
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
 
 alertmanager:
   alertmanagerSpec:
