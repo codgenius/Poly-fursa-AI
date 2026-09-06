@@ -6,7 +6,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/codgenius/Poly-fursa-AI.git
+    repoURL: https://github.com/hadikhier/Poly-fursa-AI.git
     targetRevision: main
     path: infra/k8s/prod/07-agent
   destination:
