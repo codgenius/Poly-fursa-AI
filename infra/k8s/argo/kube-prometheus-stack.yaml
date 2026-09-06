@@ -15,7 +15,7 @@ spec:
     helm:
       valueFiles:
       - $values/infra/k8s/monitoring/values.yaml
-  - repoURL: https://github.com/codgenius/Poly-fursa-AI.git
+  - repoURL: https://github.com/hadikhier/Poly-fursa-AI.git
     # Track the same branch where values.yaml lives.
     targetRevision: main
     ref: values
